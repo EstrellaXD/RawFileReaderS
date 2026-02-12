@@ -1,0 +1,99 @@
+using ThermoFisher.CommonCore.RawFileReader.Facade.Constants;
+
+namespace ThermoFisher.CommonCore.RawFileReader.FileIoStructs.FilterInfo;
+
+/// <summary>
+/// The filter info struct.
+/// </summary>
+internal struct FilterInfoStruct
+{
+	internal ScanFilterEnums.ScanDataTypes ScanData;
+
+	internal ScanFilterEnums.PolarityTypes Polarity;
+
+	internal ScanFilterEnums.MSOrderTypes MSOrder;
+
+	internal ScanFilterEnums.IsDependent Dependent;
+
+	internal ScanFilterEnums.OnOffTypes SourceCID;
+
+	internal ScanFilterEnums.ScanTypes ScanType;
+
+	internal bool IsComplete;
+
+	internal ScanFilterEnums.OnOffTypes TurboScan;
+
+	internal ScanFilterEnums.IonizationModes IonizationMode;
+
+	internal ScanFilterEnums.OnOffTypes Corona;
+
+	internal ScanFilterEnums.OnAnyOffTypes DetectorState;
+
+	internal double DetectorValue;
+
+	internal ScanFilterEnums.VoltageTypes SourceCIDType;
+
+	internal int ScanTypeIndex;
+
+	internal ScanFilterEnums.OffOnTypes Wideband;
+
+	internal ScanFilterEnums.AccurateMassTypes AccurateMass;
+
+	internal ScanFilterEnums.MassAnalyzerTypes MassAnalyzer;
+
+	internal ScanFilterEnums.SectorScans SectorScan;
+
+	internal ScanFilterEnums.OnOffTypes Lock;
+
+	internal ScanFilterEnums.FreeRegions FreeRegion;
+
+	internal ScanFilterEnums.OnOffTypes Ultra;
+
+	internal ScanFilterEnums.OnOffTypes Enhanced;
+
+	internal ScanFilterEnums.OnAnyOffTypes MultiPhotonDissociationState;
+
+	internal double MultiPhotonDissociationValue;
+
+	internal ScanFilterEnums.OnAnyOffTypes ElectronCaptureDissociationState;
+
+	internal double ElectronCaptureDissociationValue;
+
+	internal ScanFilterEnums.OnOffTypes PhotoIonization;
+
+	internal ScanFilterEnums.OnOffTypes PulsedQDissociationState;
+
+	internal double PulsedQDissociationValue;
+
+	internal ScanFilterEnums.OnOffTypes ElectronTransferDissociationState;
+
+	internal double ElectronTransferDissociationValue;
+
+	internal ScanFilterEnums.OnOffTypes HigherenergyCiDState;
+
+	internal double HigherenergyCiDValue;
+
+	internal ScanFilterEnums.OffOnTypes SupplementalActivation;
+
+	internal ScanFilterEnums.OffOnTypes MultiStateActivation;
+
+	internal ScanFilterEnums.OnOffTypes CompensationVoltage;
+
+	internal ScanFilterEnums.VoltageTypes CompensationVoltageType;
+
+	internal ScanFilterEnums.OffOnTypes Multiplex;
+
+	internal ScanFilterEnums.OffOnTypes ParamA;
+
+	internal ScanFilterEnums.OffOnTypes ParamB;
+
+	internal ScanFilterEnums.OffOnTypes ParamF;
+
+	internal ScanFilterEnums.OffOnTypes SpsMultiNotch;
+
+	internal ScanFilterEnums.OffOnTypes ParamR;
+
+	internal ScanFilterEnums.OffOnTypes ParamV;
+
+	internal uint MetaFilters;
+}

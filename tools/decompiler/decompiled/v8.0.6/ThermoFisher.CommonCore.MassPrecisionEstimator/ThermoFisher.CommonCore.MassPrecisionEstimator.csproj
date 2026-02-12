@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>ThermoFisher.CommonCore.MassPrecisionEstimator</AssemblyName>
+    <GenerateAssemblyInfo>False</GenerateAssemblyInfo>
+    <TargetFramework>netcoreapp8.0</TargetFramework>
+    <PlatformTarget>x64</PlatformTarget>
+  </PropertyGroup>
+  <PropertyGroup>
+    <LangVersion>12.0</LangVersion>
+    <AllowUnsafeBlocks>True</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <PropertyGroup />
+  <ItemGroup />
+  <ItemGroup>
+    <Reference Include="ThermoFisher.CommonCore.Data">
+      <HintPath>../../../../../../Libs/NetCore/Net8/Assemblies/ThermoFisher.CommonCore.Data.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+</Project>

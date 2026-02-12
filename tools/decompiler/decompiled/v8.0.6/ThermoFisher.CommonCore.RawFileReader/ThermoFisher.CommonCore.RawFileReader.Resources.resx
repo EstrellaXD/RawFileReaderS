@@ -1,0 +1,57 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <xsd:schema id="root" xmlns="" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:msdata="urn:schemas-microsoft-com:xml-msdata">
+    <xsd:element name="root" msdata:IsDataSet="true">
+      <xsd:complexType>
+        <xsd:choice maxOccurs="unbounded">
+          <xsd:element name="data">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element name="value" type="xsd:string" minOccurs="0" msdata:Ordinal="1" />
+                <xsd:element name="comment" type="xsd:string" minOccurs="0" msdata:Ordinal="2" />
+              </xsd:sequence>
+              <xsd:attribute name="name" type="xsd:string" msdata:Ordinal="1" />
+              <xsd:attribute name="type" type="xsd:string" msdata:Ordinal="3" />
+              <xsd:attribute name="mimetype" type="xsd:string" msdata:Ordinal="4" />
+            </xsd:complexType>
+          </xsd:element>
+          <xsd:element name="resheader">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element name="value" type="xsd:string" minOccurs="0" msdata:Ordinal="1" />
+              </xsd:sequence>
+              <xsd:attribute name="name" type="xsd:string" use="required" />
+            </xsd:complexType>
+          </xsd:element>
+        </xsd:choice>
+      </xsd:complexType>
+    </xsd:element>
+  </xsd:schema>
+<resheader name="resmimetype"><value>text/microsoft-resx</value></resheader><resheader name="version"><value>1.3</value></resheader><resheader name="reader"><value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value></resheader><resheader name="writer"><value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value></resheader><data name="ErrorNullUvScanIndexArgument" xml:space="preserve"><value>Null UV scan index argument.</value></data>
+  <data name="ErrorNullRunHeader" xml:space="preserve"><value>Null run header returned from RawFileReader</value></data>
+  <data name="ErrorNullSequenceRowArgument" xml:space="preserve"><value>Null sequence row argument.</value></data>
+  <data name="ErrorNullFileHeaderArgument" xml:space="preserve"><value>Null file header argument.</value></data>
+  <data name="ErrorInvalidInstrumentType" xml:space="preserve"><value>Invalid Instrument type.</value></data>
+  <data name="ErrorNoOpenRawFile" xml:space="preserve"><value>No open raw file.</value></data>
+  <data name="ErrorNullScanIndexArgument" xml:space="preserve"><value>Null scan index argument.</value></data>
+  <data name="ErrorMissingRawFileInfo" xml:space="preserve"><value>Missing raw file information.</value></data>
+  <data name="ErrorInvalidFileName" xml:space="preserve"><value>The file name is invalid</value></data>
+  <data name="ErrorInvalidToleranceUnit" xml:space="preserve"><value>Invalid tolerance unit.</value></data>
+  <data name="ErrorMissingInstrumentIdInfo" xml:space="preserve"><value>Missing instrument id information</value></data>
+  <data name="ErrorInvalidPacketType" xml:space="preserve"><value>Invalid Packet Type.</value></data>
+  <data name="ErrorInvalidInstrumentTypeIndex" xml:space="preserve"><value>Invalid instrument type index.</value></data>
+  <data name="ErrorInvalidVirtualDeviceType" xml:space="preserve"><value>Invalid Virtual Device Type</value></data>
+  <data name="ErrorInvalidAccurateMassType" xml:space="preserve"><value>Invalid Accurate mass Type.</value></data>
+  <data name="TraceSourceName" xml:space="preserve"><value>RawFileReaderTracer</value></data>
+  <data name="ErrorNullChromatogramSettingsArgrument" xml:space="preserve"><value>Null chromatogram settings argument</value></data>
+  <data name="ErrorInvalidSampleType" xml:space="preserve"><value>Invalid Sample Type.</value></data>
+  <data name="ErrorEmptyNullFileName" xml:space="preserve"><value>File path is empty or null!</value></data>
+  <data name="ErrorInvalidDeviceType" xml:space="preserve"><value>Invalid Device Type.</value></data>
+  <data name="ErrorNullInstrumentIdArgument" xml:space="preserve"><value>Null instrument id argument.</value></data>
+  <data name="ErrorMapAZeroLenghtFile" xml:space="preserve"><value>Cannot map a zero-length file.</value></data>
+  <data name="ErrorNonMsDevice" xml:space="preserve"><value>This is not MS device.</value></data>
+  <data name="ErrorCannotConvertToMsDevice" xml:space="preserve"><value>Cannot convert device to MS Device!</value></data>
+  <data name="ErrorInvalidBarcodeStatusType" xml:space="preserve"><value>Invalid Barcode Status Type.</value></data>
+  <data name="ErrorNullRunHeaderArgument" xml:space="preserve"><value>Null run header argument.</value></data>
+  <data name="ErrorNoInstrumentSelected" xml:space="preserve"><value>No instrument selected.</value></data>
+  </root>

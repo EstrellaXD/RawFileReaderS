@@ -1,0 +1,165 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <xsd:schema id="root" xmlns="" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:msdata="urn:schemas-microsoft-com:xml-msdata">
+    <xsd:element name="root" msdata:IsDataSet="true">
+      <xsd:complexType>
+        <xsd:choice maxOccurs="unbounded">
+          <xsd:element name="data">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element name="value" type="xsd:string" minOccurs="0" msdata:Ordinal="1" />
+                <xsd:element name="comment" type="xsd:string" minOccurs="0" msdata:Ordinal="2" />
+              </xsd:sequence>
+              <xsd:attribute name="name" type="xsd:string" msdata:Ordinal="1" />
+              <xsd:attribute name="type" type="xsd:string" msdata:Ordinal="3" />
+              <xsd:attribute name="mimetype" type="xsd:string" msdata:Ordinal="4" />
+            </xsd:complexType>
+          </xsd:element>
+          <xsd:element name="resheader">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element name="value" type="xsd:string" minOccurs="0" msdata:Ordinal="1" />
+              </xsd:sequence>
+              <xsd:attribute name="name" type="xsd:string" use="required" />
+            </xsd:complexType>
+          </xsd:element>
+        </xsd:choice>
+      </xsd:complexType>
+    </xsd:element>
+  </xsd:schema>
+<resheader name="resmimetype"><value>text/microsoft-resx</value></resheader><resheader name="version"><value>1.3</value></resheader><resheader name="reader"><value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value></resheader><resheader name="writer"><value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value></resheader><data name="MissingPacketPenaltyMode.PenaltyClosestMatchMode" xml:space="preserve"><value>Closest match</value></data>
+  <data name="PeakDetector.Genesis" xml:space="preserve"><value>Genesis</value></data>
+  <data name="PeakShape.Lorentzian" xml:space="preserve"><value>Lorentzian</value></data>
+  <data name="EdgeType.Tail" xml:space="preserve"><value>Tail</value></data>
+  <data name="EdgeType.Tilt" xml:space="preserve"><value>Tilt</value></data>
+  <data name="EdgeType.Base" xml:space="preserve"><value>Baseline</value></data>
+  <data name="RegressionMethod.SecondOrderLogLog" xml:space="preserve"><value>Quadratic Log-Log</value></data>
+  <data name="NitrogenRule.OddElectronIons" xml:space="preserve"><value>Odd electrons</value></data>
+  <data name="Weighting.EqualWeights" xml:space="preserve"><value>Equal</value></data>
+  <data name="ResultStatus.NotTested" xml:space="preserve"><value>Not Tested</value></data>
+  <data name="IntegrationMode.Manual" xml:space="preserve"><value>Manual</value></data>
+  <data name="IntegrationMode.Method" xml:space="preserve"><value>Method</value></data>
+  <data name="PatternNormalizationMode.NormModeQuadratic" xml:space="preserve"><value>Quadratic</value></data>
+  <data name="MissingPacketPenaltyMode.Penalty1StdDevMode" xml:space="preserve"><value>1 Std dev</value></data>
+  <data name="PatternNormalizationMode.NormModeLinear" xml:space="preserve"><value>Linear</value></data>
+  <data name="EdgeType.Valley" xml:space="preserve"><value>Valley</value></data>
+  <data name="Weighting.OneOverX2" xml:space="preserve"><value>1/X^2</value></data>
+  <data name="Weighting.OneOverY2" xml:space="preserve"><value>1/Y^2</value></data>
+  <data name="TraceType.Fragment" xml:space="preserve"><value>Fragment</value></data>
+  <data name="NoiseClassification.Infinite" xml:space="preserve"><value>INF</value></data>
+  <data name="EdgeType.Stripe" xml:space="preserve"><value>Stripe</value></data>
+  <data name="PatternNormalizationMode.NormModeBasePeak" xml:space="preserve"><value>Base peak</value></data>
+  <data name="EventCode.InitialEndThreshold" xml:space="preserve"><value>Initial End Threshold</value></data>
+  <data name="Origin.Excluded" xml:space="preserve"><value>Ignore</value></data>
+  <data name="IntegrationMode.User" xml:space="preserve"><value>User</value></data>
+  <data name="TraceType.TIC" xml:space="preserve"><value>TIC</value></data>
+  <data name="Device.Other" xml:space="preserve"><value>Other</value></data>
+  <data name="TraceType.Analog1" xml:space="preserve"><value>Analog 1</value></data>
+  <data name="TraceType.Analog2" xml:space="preserve"><value>Analog 2</value></data>
+  <data name="TraceType.Analog3" xml:space="preserve"><value>Analog 3</value></data>
+  <data name="TraceType.Analog4" xml:space="preserve"><value>Analog 4</value></data>
+  <data name="PeakDirection.Negative" xml:space="preserve"><value>Negative</value></data>
+  <data name="EventCode.TimedTension" xml:space="preserve"><value>Tension</value></data>
+  <data name="SmoothMethod.Gaussian" xml:space="preserve"><value>Gaussian</value></data>
+  <data name="EventCode.TimedDisableClusterOn" xml:space="preserve"><value>Disable Cluster On</value></data>
+  <data name="NitrogenRule.DoNotUse" xml:space="preserve"><value>Do not use</value></data>
+  <data name="NitrogenRule.EvenElectronIons" xml:space="preserve"><value>Even electrons</value></data>
+  <data name="Device.UV" xml:space="preserve"><value>UV</value></data>
+  <data name="Device.MS" xml:space="preserve"><value>MS</value></data>
+  <data name="EventCode.InitialStartThreshold" xml:space="preserve"><value>Initial Start Threshold</value></data>
+  <data name="NoiseClassification.NotAvailable" xml:space="preserve"><value>NA</value></data>
+  <data name="TraceType.SpectrumMax" xml:space="preserve"><value>Spectrum Max</value></data>
+  <data name="EventCode.TimedPPResolution" xml:space="preserve"><value>Point To Point Resolution</value></data>
+  <data name="EventCode.InitialBunchFactor" xml:space="preserve"><value>Initial Bunch Factor</value></data>
+  <data name="EdgeType.Manual" xml:space="preserve"><value>Manual</value></data>
+  <data name="EventCode.InitialPPResolution" xml:space="preserve"><value>Initial Point To Point Resolution</value></data>
+  <data name="PeakDirection.Positive" xml:space="preserve"><value>Positive</value></data>
+  <data name="RegressionMethod.LocallyWeighted" xml:space="preserve"><value>Locally Weighted</value></data>
+  <data name="EventCode.NoCode" xml:space="preserve"><value>None</value></data>
+  <data name="EventCode.InitialAreaThreshold" xml:space="preserve"><value>Initial Area Threshold</value></data>
+  <data name="TraceType.BasePeak" xml:space="preserve"><value>Base Peak</value></data>
+  <data name="WindowMode.Baseline" xml:space="preserve"><value>Baseline</value></data>
+  <data name="PeakDetector.Avalon" xml:space="preserve"><value>Avalon</value></data>
+  <data name="RegressionMethod.PointToPoint" xml:space="preserve"><value>Point-to-Point</value></data>
+  <data name="VoidMethod." xml:space="preserve"><value>Void Time By First Peak</value></data>
+  <data name="Weighting.OneOverSigma2" xml:space="preserve"><value>1/s^2</value></data>
+  <data name="Origin.Include" xml:space="preserve"><value>Include</value></data>
+  <data name="RegressionMethod.SecondOrder" xml:space="preserve"><value>Quadratic</value></data>
+  <data name="CentroidAlgorithm.MAT" xml:space="preserve"><value>MAT</value></data>
+  <data name="CentroidAlgorithm.GCQ" xml:space="preserve"><value>GCQ</value></data>
+  <data name="CentroidAlgorithm.FFT" xml:space="preserve"><value>FFT</value></data>
+  <data name="CentroidAlgorithm.TSQ" xml:space="preserve"><value>TSQ</value></data>
+  <data name="PeakDetector.ICIS" xml:space="preserve"><value>ICIS</value></data>
+  <data name="TraceType.WavelengthRange" xml:space="preserve"><value>Wavelength Range</value></data>
+  <data name="RegressionMethod.FirstOrderLogLog" xml:space="preserve"><value>Linear Log-Log</value></data>
+  <data name="MissingPacketPenaltyMode.Penalty4StdDevMode" xml:space="preserve"><value>4 Std dev</value></data>
+  <data name="Device.Analog" xml:space="preserve"><value>A/D Card</value></data>
+  <data name="MissingPacketPenaltyMode.PenaltyAutomaticMode" xml:space="preserve"><value>Automatic</value></data>
+  <data name="ToleranceUnits.ppm" xml:space="preserve"><value>ppm</value></data>
+  <data name="ToleranceUnits.amu" xml:space="preserve"><value>amu</value></data>
+  <data name="ToleranceUnits.mmu" xml:space="preserve"><value>mmu</value></data>
+  <data name="PeakShape.Triangular" xml:space="preserve"><value>Triangular</value></data>
+  <data name="Device.MSAnalog" xml:space="preserve"><value>Analog</value></data>
+  <data name="RegressionMethod.FirstOrder" xml:space="preserve"><value>Linear</value></data>
+  <data name="EventCode.TimedForceClusterOff" xml:space="preserve"><value>Force Cluster Off</value></data>
+  <data name="IcisNoiseType.Repetitive" xml:space="preserve"><value>Repetitive</value></data>
+  <data name="Origin.Force" xml:space="preserve"><value>Force</value></data>
+  <data name="TraceType.MassRange" xml:space="preserve"><value>Mass Range</value></data>
+  <data name="EventCode.TimedShouldersOff" xml:space="preserve"><value>Shoulders Off</value></data>
+  <data name="ToleranceMode.Amu" xml:space="preserve"><value>amu</value></data>
+  <data name="ToleranceMode.Mmu" xml:space="preserve"><value>mmu</value></data>
+  <data name="ToleranceMode.Ppm" xml:space="preserve"><value>ppm</value></data>
+  <data name="MissingPacketPenaltyMode.Penalty16StdDevMode" xml:space="preserve"><value>16 Std dev</value></data>
+  <data name="EventCode.TimedNegativePeaks" xml:space="preserve"><value>Negative Peaks</value></data>
+  <data name="PeakMethod.Highest" xml:space="preserve"><value>Highest Peak</value></data>
+  <data name="PeakShape.Gaussian" xml:space="preserve"><value>Gaussian</value></data>
+  <data name="EventCode.TimedShouldersOn" xml:space="preserve"><value>Shoulders On</value></data>
+  <data name="RegressionMethod.AverageResponseFactor" xml:space="preserve"><value>Average RF</value></data>
+  <data name="SmoothMethod.MovingMean" xml:space="preserve"><value>Moving Mean</value></data>
+  <data name="EventCode.TimedAvalonOn" xml:space="preserve"><value>Avalon On</value></data>
+  <data name="EventCode.TimedBunchFactor" xml:space="preserve"><value>Bunch Factor</value></data>
+  <data name="EventCode.TimedForceClusterOn" xml:space="preserve"><value>Force Cluster On</value></data>
+  <data name="PeakShape.Cosine" xml:space="preserve"><value>Cosine</value></data>
+  <data name="TraceType.TotalAbsorbance" xml:space="preserve"><value>Total Absorbance</value></data>
+  <data name="TraceOperator.Minus" xml:space="preserve"><value>-</value></data>
+  <data name="IonRatioWindowType.Relative" xml:space="preserve"><value>Relative</value></data>
+  <data name="ValleyDefinition.FWHM" xml:space="preserve"><value>FWHM</value></data>
+  <data name="PeakMethod.SpectralFit" xml:space="preserve"><value>Spectral Fit</value></data>
+  <data name="VoidMethod.VoidTimeByValue" xml:space="preserve"><value>Void Time By Value</value></data>
+  <data name="Polarity.Positive" xml:space="preserve"><value>Positive</value></data>
+  <data name="NoiseClassification.Value" xml:space="preserve"><value>Value</value></data>
+  <data name="EventKind.Timed" xml:space="preserve"><value>Timed</value></data>
+  <data name="CentroidAlgorithm.FTORBITRAP" xml:space="preserve"><value>FTOrbitrap</value></data>
+  <data name="ResultStatus.Passed" xml:space="preserve"><value>Passed</value></data>
+  <data name="Weighting.OneOverY" xml:space="preserve"><value>1/Y</value></data>
+  <data name="Weighting.OneOverX" xml:space="preserve"><value>1/X</value></data>
+  <data name="RegressionMethod.CubicSpline" xml:space="preserve"><value>Cubic Spline</value></data>
+  <data name="EventCode.TimedDisableClusterOff" xml:space="preserve"><value>Disable Cluster Off</value></data>
+  <data name="WindowMode.NoWindow" xml:space="preserve"><value>None</value></data>
+  <data name="TraceType.A2DChannel4" xml:space="preserve"><value>A to D Channel 4</value></data>
+  <data name="TraceType.A2DChannel2" xml:space="preserve"><value>A to D Channel 2</value></data>
+  <data name="TraceType.A2DChannel3" xml:space="preserve"><value>A to D Channel 3</value></data>
+  <data name="TraceType.A2DChannel1" xml:space="preserve"><value>A to D Channel 1</value></data>
+  <data name="ValleyDefinition.TenPercent" xml:space="preserve"><value>Ten Percent</value></data>
+  <data name="TraceType.ChannelA" xml:space="preserve"><value>Channel A</value></data>
+  <data name="TraceType.ChannelC" xml:space="preserve"><value>ChannelC</value></data>
+  <data name="TraceType.ChannelB" xml:space="preserve"><value>Channel B</value></data>
+  <data name="TraceType.ChannelD" xml:space="preserve"><value>Channel D</value></data>
+  <data name="EventCode.TimedEndThreshold" xml:space="preserve"><value>End Threshold</value></data>
+  <data name="EventKind.Initial" xml:space="preserve"><value>Initial</value></data>
+  <data name="EventCode.InitialNegativePeaks" xml:space="preserve"><value>Initial Negative Peaks</value></data>
+  <data name="PeakMethod.Nearest" xml:space="preserve"><value>Nearest Peak</value></data>
+  <data name="EventCode.InitialTension" xml:space="preserve"><value>Initial Tension</value></data>
+  <data name="EventCode.TimedStartThreshold" xml:space="preserve"><value>Start Threshold</value></data>
+  <data name="ResultStatus.Failed" xml:space="preserve"><value>Failed</value></data>
+  <data name="IcisNoiseType.Incos" xml:space="preserve"><value>Incos</value></data>
+  <data name="Device.Pda" xml:space="preserve"><value>PDA</value></data>
+  <data name="EventCode.TimedTangentSkim" xml:space="preserve"><value>Tangent Skim</value></data>
+  <data name="Polarity.Negative" xml:space="preserve"><value>Negative</value></data>
+  <data name="PeakDetector.PPD" xml:space="preserve"><value>Parameterless</value></data>
+  <data name="TraceOperator.None" xml:space="preserve"><value /></data>
+  <data name="TraceOperator.Plus" xml:space="preserve"><value>+</value></data>
+  <data name="IonRatioWindowType.Absolute" xml:space="preserve"><value>Absolute</value></data>
+  <data name="EventCode.TimedAreaThreshold" xml:space="preserve"><value>AreaThreshold</value></data>
+  <data name="EventCode.TimedAvalonOff" xml:space="preserve"><value>Avalon Off</value></data>
+  </root>
