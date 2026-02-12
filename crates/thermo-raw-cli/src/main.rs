@@ -79,6 +79,9 @@ enum Commands {
     /// Debug: dump internal addresses and sanity checks.
     Debug { file: PathBuf },
 
+    /// Diagnose: stage-by-stage parsing report (non-cascading).
+    Diagnose { file: PathBuf },
+
     /// Convert RAW file(s) to mzML format.
     Convert {
         /// Input RAW file or folder of RAW files.
@@ -534,6 +537,12 @@ fn main() -> anyhow::Result<()> {
                     elapsed.as_secs_f64()
                 );
             }
+        }
+
+        Commands::Diagnose { file } => {
+            let data = std::fs::read(&file)?;
+            let report = thermo_raw::diagnose(&data);
+            report.print();
         }
 
         Commands::Benchmark {

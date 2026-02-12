@@ -100,38 +100,33 @@ impl RawFile {
 
     /// Parse RAW file structures from raw data.
     fn from_data(data: FileData) -> Result<Self, RawError> {
-        // Find the Finnigan magic in the first 64KB of the file
         let finnigan_offset = find_finnigan_magic(&data).ok_or(RawError::NotRawFile)?;
 
-        // Parse FileHeader
-        let file_header = FileHeader::parse(&data[finnigan_offset..])?;
+        let file_header = FileHeader::parse(&data[finnigan_offset..])
+            .map_err(|e| parse_error("FileHeader", finnigan_offset as u64, None, e))?;
         let ver = file_header.version;
 
         if !version::is_supported(ver) {
             return Err(RawError::UnsupportedVersion(ver));
         }
 
-        // Find RawFileInfo by searching forward from FileHeader.
-        // In v66+ files, SequencerRow and AutoSamplerInfo (.NET serialized blobs)
-        // are placed between FileHeader and RawFileInfo. Rather than parsing
-        // these blobs (which we don't need), we scan for a valid RawFileInfo
-        // by trying candidate offsets and validating the VCI entries.
         let info_base = finnigan_offset as u64 + FileHeader::size() as u64;
-        let raw_file_info = find_raw_file_info(&data, info_base, ver)?;
+        let raw_file_info = find_raw_file_info(&data, info_base, ver)
+            .map_err(|e| parse_error("RawFileInfo", info_base, Some(ver), e))?;
 
-        // Parse RunHeader at the address from RawFileInfo
         let rh_addr = raw_file_info.run_header_addr();
         if rh_addr == 0 {
             return Err(RawError::StreamNotFound(
                 "File has no data controllers (empty/blank acquisition)".to_string(),
             ));
         }
-        let run_header = RunHeader::parse(&data, rh_addr, ver)?;
+        let run_header = RunHeader::parse(&data, rh_addr, ver)
+            .map_err(|e| parse_error("RunHeader", rh_addr, Some(ver), e))?;
 
-        // Parse ScanIndex
         let n_scans = run_header.n_scans();
         let si_addr = run_header.scan_index_addr();
-        let scan_index_entries = scan_index::parse_scan_index(&data, si_addr, ver, n_scans)?;
+        let scan_index_entries = scan_index::parse_scan_index(&data, si_addr, ver, n_scans)
+            .map_err(|e| parse_error("ScanIndex", si_addr, Some(ver), e))?;
 
         // DataOffset (both 32-bit and 64-bit) is relative to PacketPos (the data stream base).
         // Absolute scan data offset = PacketPos + DataOffset.
@@ -736,6 +731,276 @@ impl RawFile {
     }
 }
 
+/// Stage-by-stage diagnostic result for a RAW file.
+pub struct DiagnosticReport {
+    pub file_size: u64,
+    pub stages: Vec<DiagnosticStage>,
+}
+
+pub struct DiagnosticStage {
+    pub name: String,
+    pub success: bool,
+    pub detail: String,
+}
+
+impl DiagnosticReport {
+    pub fn print(&self) {
+        println!("=== RAW File Diagnostic Report ===");
+        println!(
+            "File size: {} bytes ({:.1} MB)\n",
+            self.file_size,
+            self.file_size as f64 / 1e6
+        );
+        for stage in &self.stages {
+            let status = if stage.success { "OK" } else { "FAIL" };
+            println!("[{:>4}] {}", status, stage.name);
+            for line in stage.detail.lines() {
+                println!("       {}", line);
+            }
+        }
+    }
+}
+
+/// Run stage-by-stage diagnostics on raw file data without cascading failures.
+pub fn diagnose(data: &[u8]) -> DiagnosticReport {
+    let file_size = data.len() as u64;
+    let mut stages = Vec::new();
+
+    // Stage 1: Find Finnigan magic
+    let finnigan_offset = match find_finnigan_magic(data) {
+        Some(off) => {
+            stages.push(DiagnosticStage {
+                name: "Finnigan magic".to_string(),
+                success: true,
+                detail: format!("Found at offset {}", off),
+            });
+            off
+        }
+        None => {
+            stages.push(DiagnosticStage {
+                name: "Finnigan magic".to_string(),
+                success: false,
+                detail: "Not found in first 64KB".to_string(),
+            });
+            return DiagnosticReport { file_size, stages };
+        }
+    };
+
+    // Stage 2: Parse FileHeader
+    let file_header = match FileHeader::parse(&data[finnigan_offset..]) {
+        Ok(h) => {
+            stages.push(DiagnosticStage {
+                name: "FileHeader".to_string(),
+                success: true,
+                detail: format!("Version: {}, signature: {:?}", h.version, h.tag),
+            });
+            h
+        }
+        Err(e) => {
+            stages.push(DiagnosticStage {
+                name: "FileHeader".to_string(),
+                success: false,
+                detail: format!("Parse error: {}", e),
+            });
+            return DiagnosticReport { file_size, stages };
+        }
+    };
+    let ver = file_header.version;
+
+    if !version::is_supported(ver) {
+        stages.push(DiagnosticStage {
+            name: "Version check".to_string(),
+            success: false,
+            detail: format!("Version {} not supported (need 57-66)", ver),
+        });
+        return DiagnosticReport { file_size, stages };
+    }
+
+    // Stage 3: Find RawFileInfo
+    let info_base = finnigan_offset as u64 + FileHeader::size() as u64;
+    let raw_file_info = match find_raw_file_info(data, info_base, ver) {
+        Ok(info) => {
+            let n_active = info.controllers.iter().filter(|c| c.offset > 0).count();
+            stages.push(DiagnosticStage {
+                name: "RawFileInfo".to_string(),
+                success: true,
+                detail: format!(
+                    "Date: {}, n_controllers: {} ({} active), end_offset: {}",
+                    info.acquisition_date(),
+                    info.n_controllers,
+                    n_active,
+                    info.end_offset
+                ),
+            });
+            info
+        }
+        Err(e) => {
+            stages.push(DiagnosticStage {
+                name: "RawFileInfo".to_string(),
+                success: false,
+                detail: format!("Search failed from offset {}: {}", info_base, e),
+            });
+            return DiagnosticReport { file_size, stages };
+        }
+    };
+
+    // Stage 4: Parse RunHeader
+    let rh_addr = raw_file_info.run_header_addr();
+    if rh_addr == 0 {
+        stages.push(DiagnosticStage {
+            name: "RunHeader".to_string(),
+            success: false,
+            detail: "No data controllers (run_header_addr = 0)".to_string(),
+        });
+        return DiagnosticReport { file_size, stages };
+    }
+
+    let run_header = match RunHeader::parse(data, rh_addr, ver) {
+        Ok(rh) => {
+            stages.push(DiagnosticStage {
+                name: "RunHeader".to_string(),
+                success: true,
+                detail: format!(
+                    "Scans: {}-{}, RT: {:.2}-{:.2} min, mass: {:.1}-{:.1}\n\
+                     ScanIndex64: {:?}, DataAddr64: {:?}\n\
+                     TrailerAddr64: {:?}, ParamsAddr64: {:?}\n\
+                     Device: {}, Model: {}",
+                    rh.first_scan, rh.last_scan,
+                    rh.start_time, rh.end_time,
+                    rh.low_mass, rh.high_mass,
+                    rh.scan_index_addr_64, rh.data_addr_64,
+                    rh.scan_trailer_addr_64, rh.scan_params_addr_64,
+                    rh.device_name, rh.model,
+                ),
+            });
+            rh
+        }
+        Err(e) => {
+            stages.push(DiagnosticStage {
+                name: "RunHeader".to_string(),
+                success: false,
+                detail: format!("Parse error at offset {}: {}", rh_addr, e),
+            });
+            return DiagnosticReport { file_size, stages };
+        }
+    };
+
+    // Stage 5: Parse ScanIndex
+    let n_scans = run_header.n_scans();
+    let si_addr = run_header.scan_index_addr();
+    let scan_index_entries = match scan_index::parse_scan_index(data, si_addr, ver, n_scans) {
+        Ok(entries) => {
+            let sample = entries
+                .iter()
+                .take(3)
+                .map(|e| format!("offset={}, size={}, rt={:.4}", e.offset, e.data_size, e.rt))
+                .collect::<Vec<_>>()
+                .join(", ");
+            stages.push(DiagnosticStage {
+                name: "ScanIndex".to_string(),
+                success: true,
+                detail: format!(
+                    "{} entries parsed at offset {}\nFirst entries: [{}]",
+                    entries.len(),
+                    si_addr,
+                    sample
+                ),
+            });
+            entries
+        }
+        Err(e) => {
+            stages.push(DiagnosticStage {
+                name: "ScanIndex".to_string(),
+                success: false,
+                detail: format!("Parse error at offset {} ({} scans): {}", si_addr, n_scans, e),
+            });
+            return DiagnosticReport { file_size, stages };
+        }
+    };
+
+    // Stage 6: TrailerLayout
+    let spect_pos = run_header.scan_index_addr();
+    let trailer_extra_pos = run_header.scan_params_addr();
+    if trailer_extra_pos > 0 && spect_pos > 0 {
+        let layout = trailer::find_generic_data_header(data, spect_pos)
+            .map(|h| h.with_records_offset(trailer_extra_pos))
+            .and_then(|h| Ok(TrailerLayout::from_header(h)))
+            .or_else(|_| {
+                let addr = run_header.scan_trailer_addr();
+                if addr > 0 {
+                    trailer::parse_generic_data_header(data, addr)
+                        .map(TrailerLayout::from_header)
+                } else {
+                    Err(RawError::StreamNotFound("No trailer address".to_string()))
+                }
+            });
+
+        match layout {
+            Ok(layout) => stages.push(DiagnosticStage {
+                name: "TrailerLayout".to_string(),
+                success: true,
+                detail: format!(
+                    "{} fields, record_size={}, filter_idx={:?}, master_scan_idx={:?}",
+                    layout.header.descriptors.len(),
+                    layout.record_size,
+                    layout.filter_text_idx,
+                    layout.master_scan_idx
+                ),
+            }),
+            Err(e) => stages.push(DiagnosticStage {
+                name: "TrailerLayout".to_string(),
+                success: false,
+                detail: format!("GDH search failed: {}", e),
+            }),
+        }
+    } else {
+        stages.push(DiagnosticStage {
+            name: "TrailerLayout".to_string(),
+            success: false,
+            detail: format!(
+                "Skipped (trailer_extra_pos={}, spect_pos={})",
+                trailer_extra_pos, spect_pos
+            ),
+        });
+    }
+
+    // Stage 7: Try decoding scan 1
+    if let Some(first_entry) = scan_index_entries.first() {
+        let data_addr = run_header.data_addr();
+        let scan_num = run_header.first_scan;
+        let result = scan_data::decode_scan(data, data_addr as usize, first_entry, scan_num, &[]);
+
+        let (success, detail) = match result {
+            Ok(scan) => (
+                true,
+                format!(
+                    "{} centroids, tic={:.2e}, base_peak_mz={:.4}",
+                    scan.centroid_mz.len(),
+                    scan.tic,
+                    scan.base_peak_mz
+                ),
+            ),
+            Err(e) => (
+                false,
+                format!(
+                    "Abs offset={}, data_size={}: {}",
+                    data_addr + first_entry.offset,
+                    first_entry.data_size,
+                    e
+                ),
+            ),
+        };
+
+        stages.push(DiagnosticStage {
+            name: "Scan decode (first)".to_string(),
+            success,
+            detail,
+        });
+    }
+
+    DiagnosticReport { file_size, stages }
+}
+
 /// Search for a valid RawFileInfo by scanning forward from the given offset.
 ///
 /// In v66+ files, .NET serialized metadata blobs (SequencerRow, AutoSamplerInfo)
@@ -796,4 +1061,18 @@ fn find_finnigan_magic(data: &[u8]) -> Option<usize> {
         }
     }
     None
+}
+
+/// Helper to format parse errors with consistent context.
+fn parse_error(
+    component: &str,
+    offset: u64,
+    version: Option<u32>,
+    error: impl std::fmt::Display,
+) -> RawError {
+    let version_str = version.map_or(String::new(), |v| format!(" (v{})", v));
+    RawError::CorruptedData(format!(
+        "{} parsing failed at offset {}{}: {}",
+        component, offset, version_str, error
+    ))
 }

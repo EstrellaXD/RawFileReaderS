@@ -44,5 +44,5 @@ pub mod validation;
 
 pub use batch::{BatchXicResult, batch_xic_ms1};
 pub use error::RawError;
-pub use raw_file::{DebugInfo, RawFile};
+pub use raw_file::{DebugInfo, DiagnosticReport, DiagnosticStage, RawFile, diagnose};
 pub use types::*;

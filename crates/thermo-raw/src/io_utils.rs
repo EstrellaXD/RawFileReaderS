@@ -38,45 +38,56 @@ impl<'a> BinaryReader<'a> {
     }
 
     pub fn read_u8(&mut self) -> Result<u8, RawError> {
+        self.check_remaining(1, "read_u8")?;
         self.cursor.read_u8().map_err(RawError::Io)
     }
 
     pub fn read_u16(&mut self) -> Result<u16, RawError> {
+        self.check_remaining(2, "read_u16")?;
         self.cursor.read_u16::<LittleEndian>().map_err(RawError::Io)
     }
 
     pub fn read_u32(&mut self) -> Result<u32, RawError> {
+        self.check_remaining(4, "read_u32")?;
         self.cursor.read_u32::<LittleEndian>().map_err(RawError::Io)
     }
 
     pub fn read_i32(&mut self) -> Result<i32, RawError> {
+        self.check_remaining(4, "read_i32")?;
         self.cursor.read_i32::<LittleEndian>().map_err(RawError::Io)
     }
 
     pub fn read_u64(&mut self) -> Result<u64, RawError> {
+        self.check_remaining(8, "read_u64")?;
         self.cursor.read_u64::<LittleEndian>().map_err(RawError::Io)
     }
 
     pub fn read_f32(&mut self) -> Result<f32, RawError> {
+        self.check_remaining(4, "read_f32")?;
         self.cursor.read_f32::<LittleEndian>().map_err(RawError::Io)
     }
 
     pub fn read_f64(&mut self) -> Result<f64, RawError> {
+        self.check_remaining(8, "read_f64")?;
         self.cursor.read_f64::<LittleEndian>().map_err(RawError::Io)
+    }
+
+    fn check_remaining(&self, needed: usize, op: &str) -> Result<(), RawError> {
+        let remaining = self.remaining();
+        if remaining < needed {
+            return Err(RawError::CorruptedData(format!(
+                "{}: need {} bytes at offset {}, but only {} remaining (file size: {})",
+                op, needed, self.cursor.position(), remaining, self.cursor.get_ref().len()
+            )));
+        }
+        Ok(())
     }
 
     /// Read N bytes into a new Vec.
     pub fn read_bytes(&mut self, n: usize) -> Result<Vec<u8>, RawError> {
+        self.check_remaining(n, "read_bytes")?;
         let pos = self.cursor.position() as usize;
         let data = self.cursor.get_ref();
-        if pos + n > data.len() {
-            return Err(RawError::CorruptedData(format!(
-                "read_bytes: tried to read {} bytes at offset {}, but only {} available",
-                n,
-                pos,
-                data.len() - pos
-            )));
-        }
         let result = data[pos..pos + n].to_vec();
         self.cursor.set_position((pos + n) as u64);
         Ok(result)
@@ -84,15 +95,8 @@ impl<'a> BinaryReader<'a> {
 
     /// Skip N bytes.
     pub fn skip(&mut self, n: usize) -> Result<(), RawError> {
-        let new_pos = self.cursor.position() + n as u64;
-        if new_pos > self.cursor.get_ref().len() as u64 {
-            return Err(RawError::CorruptedData(format!(
-                "skip: tried to skip to offset {}, but file is only {} bytes",
-                new_pos,
-                self.cursor.get_ref().len()
-            )));
-        }
-        self.cursor.set_position(new_pos);
+        self.check_remaining(n, "skip")?;
+        self.cursor.set_position(self.cursor.position() + n as u64);
         Ok(())
     }
 
@@ -144,17 +148,9 @@ impl<'a> BinaryReader<'a> {
 
     /// Get a slice of the underlying data at the current position.
     pub fn slice(&self, len: usize) -> Result<&'a [u8], RawError> {
+        self.check_remaining(len, "slice")?;
         let pos = self.cursor.position() as usize;
-        let data = self.cursor.get_ref();
-        if pos + len > data.len() {
-            return Err(RawError::CorruptedData(format!(
-                "slice: requested {} bytes at {}, only {} available",
-                len,
-                pos,
-                data.len() - pos
-            )));
-        }
-        Ok(&data[pos..pos + len])
+        Ok(&self.cursor.get_ref()[pos..pos + len])
     }
 }
 
@@ -216,5 +212,182 @@ mod tests {
         reader.skip(50).unwrap();
         assert_eq!(reader.remaining(), 50);
         assert_eq!(reader.position(), 50);
+    }
+
+    // Bounds-checking tests for check_remaining()
+
+    #[test]
+    fn test_read_u32_insufficient_bytes() {
+        // Only 3 bytes available, but u32 needs 4
+        let data: Vec<u8> = vec![0x01, 0x02, 0x03];
+        let mut reader = BinaryReader::new(&data);
+        let err = reader.read_u32().unwrap_err();
+        match err {
+            RawError::CorruptedData(msg) => {
+                assert!(msg.contains("read_u32"));
+                assert!(msg.contains("need 4 bytes"));
+                assert!(msg.contains("only 3 remaining"));
+                assert!(msg.contains("file size: 3"));
+            }
+            _ => panic!("Expected CorruptedData error, got {:?}", err),
+        }
+    }
+
+    #[test]
+    fn test_read_u64_insufficient_bytes() {
+        // Only 5 bytes available, but u64 needs 8
+        let data: Vec<u8> = vec![0x01, 0x02, 0x03, 0x04, 0x05];
+        let mut reader = BinaryReader::new(&data);
+        let err = reader.read_u64().unwrap_err();
+        match err {
+            RawError::CorruptedData(msg) => {
+                assert!(msg.contains("read_u64"));
+                assert!(msg.contains("need 8 bytes"));
+                assert!(msg.contains("only 5 remaining"));
+            }
+            _ => panic!("Expected CorruptedData error, got {:?}", err),
+        }
+    }
+
+    #[test]
+    fn test_read_u16_insufficient_bytes() {
+        // Only 1 byte available, but u16 needs 2
+        let data: Vec<u8> = vec![0x01];
+        let mut reader = BinaryReader::new(&data);
+        let err = reader.read_u16().unwrap_err();
+        match err {
+            RawError::CorruptedData(msg) => {
+                assert!(msg.contains("read_u16"));
+                assert!(msg.contains("need 2 bytes"));
+                assert!(msg.contains("only 1 remaining"));
+            }
+            _ => panic!("Expected CorruptedData error, got {:?}", err),
+        }
+    }
+
+    #[test]
+    fn test_read_u8_insufficient_bytes() {
+        // Empty buffer
+        let data: Vec<u8> = vec![];
+        let mut reader = BinaryReader::new(&data);
+        let err = reader.read_u8().unwrap_err();
+        match err {
+            RawError::CorruptedData(msg) => {
+                assert!(msg.contains("read_u8"));
+                assert!(msg.contains("need 1 bytes"));
+                assert!(msg.contains("only 0 remaining"));
+            }
+            _ => panic!("Expected CorruptedData error, got {:?}", err),
+        }
+    }
+
+    #[test]
+    fn test_read_i32_insufficient_bytes() {
+        // Only 2 bytes available, but i32 needs 4
+        let data: Vec<u8> = vec![0x01, 0x02];
+        let mut reader = BinaryReader::new(&data);
+        let err = reader.read_i32().unwrap_err();
+        match err {
+            RawError::CorruptedData(msg) => {
+                assert!(msg.contains("read_i32"));
+                assert!(msg.contains("need 4 bytes"));
+                assert!(msg.contains("only 2 remaining"));
+            }
+            _ => panic!("Expected CorruptedData error, got {:?}", err),
+        }
+    }
+
+    #[test]
+    fn test_read_f32_insufficient_bytes() {
+        // Only 3 bytes available, but f32 needs 4
+        let data: Vec<u8> = vec![0x01, 0x02, 0x03];
+        let mut reader = BinaryReader::new(&data);
+        let err = reader.read_f32().unwrap_err();
+        match err {
+            RawError::CorruptedData(msg) => {
+                assert!(msg.contains("read_f32"));
+                assert!(msg.contains("need 4 bytes"));
+            }
+            _ => panic!("Expected CorruptedData error, got {:?}", err),
+        }
+    }
+
+    #[test]
+    fn test_read_f64_insufficient_bytes() {
+        // Only 6 bytes available, but f64 needs 8
+        let data: Vec<u8> = vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06];
+        let mut reader = BinaryReader::new(&data);
+        let err = reader.read_f64().unwrap_err();
+        match err {
+            RawError::CorruptedData(msg) => {
+                assert!(msg.contains("read_f64"));
+                assert!(msg.contains("need 8 bytes"));
+                assert!(msg.contains("only 6 remaining"));
+            }
+            _ => panic!("Expected CorruptedData error, got {:?}", err),
+        }
+    }
+
+    #[test]
+    fn test_read_with_offset_insufficient_bytes() {
+        // 10 bytes total, start at offset 8, try to read u32 (needs 4 bytes)
+        let data: Vec<u8> = vec![0; 10];
+        let mut reader = BinaryReader::at_offset(&data, 8);
+        let err = reader.read_u32().unwrap_err();
+        match err {
+            RawError::CorruptedData(msg) => {
+                assert!(msg.contains("read_u32"));
+                assert!(msg.contains("need 4 bytes"));
+                assert!(msg.contains("offset 8"));
+                assert!(msg.contains("only 2 remaining"));
+            }
+            _ => panic!("Expected CorruptedData error, got {:?}", err),
+        }
+    }
+
+    #[test]
+    fn test_reads_succeed_with_sufficient_bytes() {
+        // Verify all read operations succeed when sufficient bytes are present
+        let data: Vec<u8> = vec![
+            0x42, // u8
+            0x01, 0x02, // u16
+            0x03, 0x04, 0x05, 0x06, // u32
+            0x07, 0x08, 0x09, 0x0A, // i32
+            0x00, 0x00, 0x80, 0x3F, // f32: 1.0
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF0, 0x3F, // f64: 1.0
+        ];
+        let mut reader = BinaryReader::new(&data);
+
+        assert_eq!(reader.read_u8().unwrap(), 0x42);
+        assert_eq!(reader.read_u16().unwrap(), 0x0201);
+        assert_eq!(reader.read_u32().unwrap(), 0x06050403);
+        assert_eq!(reader.read_i32().unwrap(), 0x0A090807);
+        assert_eq!(reader.read_f32().unwrap(), 1.0);
+        assert_eq!(reader.read_f64().unwrap(), 1.0);
+    }
+
+    #[test]
+    fn test_sequential_reads_track_position_correctly() {
+        let data: Vec<u8> = vec![0; 20];
+        let mut reader = BinaryReader::new(&data);
+
+        reader.read_u32().unwrap(); // consume 4 bytes
+        assert_eq!(reader.remaining(), 16);
+
+        reader.read_u64().unwrap(); // consume 8 bytes
+        assert_eq!(reader.remaining(), 8);
+
+        // Try to read u64 (needs 8 bytes, exactly 8 remaining - should succeed)
+        assert!(reader.read_u64().is_ok());
+        assert_eq!(reader.remaining(), 0);
+
+        // Try to read u8 (needs 1 byte, but 0 remaining - should fail)
+        let err = reader.read_u8().unwrap_err();
+        match err {
+            RawError::CorruptedData(msg) => {
+                assert!(msg.contains("only 0 remaining"));
+            }
+            _ => panic!("Expected CorruptedData error, got {:?}", err),
+        }
     }
 }
