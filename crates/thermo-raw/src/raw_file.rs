@@ -249,7 +249,7 @@ impl RawFile {
             self.data_addr as usize,
             entry,
             scan_number,
-            &conversion_params,
+            conversion_params,
         )?;
 
         // Enrich with trailer-derived metadata
@@ -278,7 +278,7 @@ impl RawFile {
                     self.data_addr as usize,
                     entry,
                     *scan_num,
-                    &conversion_params,
+                    conversion_params,
                 )?;
                 self.enrich_scan(&mut scan, *scan_idx);
                 Ok(scan)
@@ -357,7 +357,7 @@ impl RawFile {
                 }
 
                 let scan_num = self.run_header.first_scan + idx as u32;
-                let scan = match self.scan(scan_num) {
+                let scan = match self.decode_scan_raw(entry, scan_num) {
                     Ok(s) => s,
                     Err(_) => return Some((entry.rt, vec![0.0; n_targets])),
                 };
@@ -380,14 +380,19 @@ impl RawFile {
 
         // Transpose: Vec<(rt, Vec<intensity>)> → Vec<Chromatogram>
         let filtered: Vec<_> = per_scan.into_iter().flatten().collect();
-        let rts: Vec<f64> = filtered.iter().map(|(rt, _)| *rt).collect();
+        let mut rts: Vec<f64> = filtered.iter().map(|(rt, _)| *rt).collect();
 
-        let chromatograms = (0..n_targets)
-            .map(|t| Chromatogram {
-                rt: rts.clone(),
-                intensity: filtered.iter().map(|(_, ints)| ints[t]).collect(),
-            })
-            .collect();
+        // Build chromatograms: clone rts for all but the last, move for the last (saves one alloc)
+        let mut chromatograms = Vec::with_capacity(n_targets);
+        for t in 0..n_targets {
+            let intensity = filtered.iter().map(|(_, ints)| ints[t]).collect();
+            let rt = if t + 1 < n_targets {
+                rts.clone()
+            } else {
+                std::mem::take(&mut rts)
+            };
+            chromatograms.push(Chromatogram { rt, intensity });
+        }
 
         Ok(chromatograms)
     }
@@ -414,14 +419,14 @@ impl RawFile {
                 }
 
                 // Pre-filter: skip scans whose m/z range doesn't overlap the target
-                if entry.low_mz > 0.0 && entry.high_mz > 0.0 {
-                    if entry.high_mz < low || entry.low_mz > high {
-                        return Some((entry.rt, 0.0));
-                    }
+                if entry.low_mz > 0.0 && entry.high_mz > 0.0
+                    && (entry.high_mz < low || entry.low_mz > high)
+                {
+                    return Some((entry.rt, 0.0));
                 }
 
                 let scan_num = self.run_header.first_scan + idx as u32;
-                let scan = match self.scan(scan_num) {
+                let scan = match self.decode_scan_raw(entry, scan_num) {
                     Ok(s) => s,
                     Err(_) => return Some((entry.rt, 0.0)),
                 };
@@ -557,12 +562,20 @@ impl RawFile {
         Ok(container.list_streams())
     }
 
+    /// Decode a scan without enrichment (no trailer/filter parsing).
+    ///
+    /// Used by XIC extraction where only centroid m/z + intensity are needed.
+    fn decode_scan_raw(&self, entry: &ScanIndexEntry, scan_number: u32) -> Result<Scan, RawError> {
+        let conversion_params = self.get_conversion_params(entry);
+        scan_data::decode_scan(&self.data, self.data_addr as usize, entry, scan_number, conversion_params)
+    }
+
     /// Look up conversion parameters for a scan from its ScanEvent.
-    fn get_conversion_params(&self, entry: &ScanIndexEntry) -> Vec<f64> {
+    fn get_conversion_params(&self, entry: &ScanIndexEntry) -> &[f64] {
         self.scan_events_lazy()
             .get(entry.scan_event as usize)
-            .map(|e| e.conversion_params.clone())
-            .unwrap_or_default()
+            .map(|e| e.conversion_params.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Enrich a scan with trailer-derived metadata.

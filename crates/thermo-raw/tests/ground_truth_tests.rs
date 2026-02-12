@@ -160,7 +160,7 @@ fn test_centroid_mz_tolerance() {
 
     for entry in std::fs::read_dir(&centroids_dir).unwrap() {
         let path = entry.unwrap().path();
-        if !path.extension().map_or(false, |e| e == "json") {
+        if path.extension().is_none_or(|e| e != "json") {
             continue;
         }
 

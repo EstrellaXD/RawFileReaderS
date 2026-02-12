@@ -6,11 +6,11 @@
 //! Key version boundaries (from decompiled ThermoFisher.CommonCore.RawFileReader):
 //! - v64: 64-bit addresses, VirtualControllerInfoStruct, RunHeader extended offsets
 //! - v65: ScanIndexEntry gains CycleNumber (84→88 bytes with padding),
-//!        ScanEventInfoStruct gains new filter flags (128→132 bytes),
-//!        RawFileInfo gains BlobOffset/BlobSize,
-//!        ScanEvent gains Name field, Reaction gains precursor mass range
+//!   ScanEventInfoStruct gains new filter flags (128→132 bytes),
+//!   RawFileInfo gains BlobOffset/BlobSize,
+//!   ScanEvent gains Name field, Reaction gains precursor mass range
 //! - v66: RunHeader gains InstrumentType field,
-//!        Reaction gains IsolationWidthOffset (48→56 bytes)
+//!   Reaction gains IsolationWidthOffset (48→56 bytes)
 
 /// Minimum supported RAW file version.
 pub const MIN_SUPPORTED_VERSION: u32 = 57;
@@ -22,7 +22,7 @@ pub const FINNIGAN_MAGIC: u16 = 0xA101;
 
 /// Check whether a RAW file version is supported.
 pub fn is_supported(version: u32) -> bool {
-    version >= MIN_SUPPORTED_VERSION && version <= MAX_SUPPORTED_VERSION
+    (MIN_SUPPORTED_VERSION..=MAX_SUPPORTED_VERSION).contains(&version)
 }
 
 /// Size of a ScanIndexEntry for a given version.

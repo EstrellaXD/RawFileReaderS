@@ -159,9 +159,9 @@ maturin develop --release
 ### Usage
 
 ```python
-import thermo_raw
+import RawFileReaderS
 
-raw = thermo_raw.RawFile("sample.raw")
+raw = RawFileReaderS.RawFile("sample.raw")
 scan = raw.scan(1)
 print(f"MS level: {scan.ms_level}, points: {len(scan.mz)}")
 ```

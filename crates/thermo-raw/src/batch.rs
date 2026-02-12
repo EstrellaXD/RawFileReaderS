@@ -54,9 +54,11 @@ pub fn batch_xic_ms1(
         return Err(RawError::CorruptedData("No targets provided".to_string()));
     }
 
+    type FileResult = Result<(String, Vec<Chromatogram>), (String, RawError)>;
+
     // Open all files in parallel and extract chromatograms.
     // Files that fail to open (e.g. blank acquisitions) are skipped with a warning.
-    let results: Vec<Result<(String, Vec<Chromatogram>), (String, RawError)>> = paths
+    let results: Vec<FileResult> = paths
         .par_iter()
         .map(|path| {
             let name = path

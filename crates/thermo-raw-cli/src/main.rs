@@ -71,10 +71,34 @@ enum Commands {
         parallel: bool,
         #[arg(long)]
         mmap: bool,
+        /// Also benchmark XIC extraction (internally timed).
+        #[arg(long)]
+        xic: bool,
     },
 
     /// Debug: dump internal addresses and sanity checks.
     Debug { file: PathBuf },
+
+    /// Convert RAW file(s) to mzML format.
+    Convert {
+        /// Input RAW file or folder of RAW files.
+        input: PathBuf,
+        /// Output path (file for single, directory for folder conversion).
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// m/z precision: 32 or 64 (default: 64).
+        #[arg(long, default_value = "64")]
+        mz_bits: u8,
+        /// Intensity precision: 32 or 64 (default: 32).
+        #[arg(long, default_value = "32")]
+        intensity_bits: u8,
+        /// Compression: none, zlib (default).
+        #[arg(long, default_value = "zlib")]
+        compression: String,
+        /// Skip index generation (plain mzML instead of indexed).
+        #[arg(long)]
+        no_index: bool,
+    },
 
     /// Batch EIC extraction across multiple RAW files.
     ///
@@ -458,10 +482,65 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
+        Commands::Convert {
+            input,
+            output,
+            mz_bits,
+            intensity_bits,
+            compression,
+            no_index,
+        } => {
+            let mz_precision = match mz_bits {
+                32 => thermo_raw_mzml::Precision::F32,
+                _ => thermo_raw_mzml::Precision::F64,
+            };
+            let intensity_precision = match intensity_bits {
+                64 => thermo_raw_mzml::Precision::F64,
+                _ => thermo_raw_mzml::Precision::F32,
+            };
+            let comp = match compression.to_lowercase().as_str() {
+                "none" => thermo_raw_mzml::Compression::None,
+                _ => thermo_raw_mzml::Compression::Zlib,
+            };
+            let config = thermo_raw_mzml::MzmlConfig {
+                mz_precision,
+                intensity_precision,
+                compression: comp,
+                write_index: !no_index,
+            };
+
+            if input.is_dir() {
+                let out_dir = output.unwrap_or_else(|| input.clone());
+                let start = std::time::Instant::now();
+                let files = thermo_raw_mzml::convert_folder(&input, &out_dir, &config)?;
+                let elapsed = start.elapsed();
+                println!(
+                    "Converted {} files in {:.1}s",
+                    files.len(),
+                    elapsed.as_secs_f64()
+                );
+                for f in &files {
+                    println!("  {}", f.display());
+                }
+            } else {
+                let out_path = output.unwrap_or_else(|| input.with_extension("mzML"));
+                let start = std::time::Instant::now();
+                thermo_raw_mzml::convert_file(&input, &out_path, &config)?;
+                let elapsed = start.elapsed();
+                println!(
+                    "Converted {} -> {} in {:.1}s",
+                    input.display(),
+                    out_path.display(),
+                    elapsed.as_secs_f64()
+                );
+            }
+        }
+
         Commands::Benchmark {
             file,
             parallel,
             mmap,
+            xic,
         } => {
             let raw = if mmap {
                 RawFile::open_mmap(&file)?
@@ -470,31 +549,58 @@ fn main() -> anyhow::Result<()> {
             };
             let mode = if mmap { "mmap" } else { "read" };
 
-            let start = std::time::Instant::now();
-            if parallel {
-                let scans = raw.scans_parallel(raw.first_scan()..raw.last_scan() + 1)?;
+            if xic {
+                // XIC benchmark: internally timed to exclude process startup
+                let targets = [524.2648, 445.12, 300.15, 600.33, 750.42,
+                               200.10, 888.55, 1100.78, 350.22, 500.00];
+                let ppm = 5.0;
+
+                // Single target XIC
+                let start = std::time::Instant::now();
+                let chrom = raw.xic_ms1(targets[0], ppm)?;
                 let elapsed = start.elapsed();
-                println!(
-                    "{} scans read in {:.1}ms ({:.1} scans/sec) [parallel, {}]",
-                    scans.len(),
-                    elapsed.as_secs_f64() * 1000.0,
-                    scans.len() as f64 / elapsed.as_secs_f64(),
-                    mode
-                );
+                println!("XIC MS1 single: {:.1}ms ({} points)", elapsed.as_secs_f64() * 1000.0, chrom.rt.len());
+
+                // 3-target batch XIC
+                let batch3: Vec<(f64, f64)> = targets[..3].iter().map(|&mz| (mz, ppm)).collect();
+                let start = std::time::Instant::now();
+                let chroms = raw.xic_batch_ms1(&batch3)?;
+                let elapsed = start.elapsed();
+                println!("XIC MS1 batch 3: {:.1}ms ({} chroms)", elapsed.as_secs_f64() * 1000.0, chroms.len());
+
+                // 10-target batch XIC
+                let batch10: Vec<(f64, f64)> = targets.iter().map(|&mz| (mz, ppm)).collect();
+                let start = std::time::Instant::now();
+                let chroms = raw.xic_batch_ms1(&batch10)?;
+                let elapsed = start.elapsed();
+                println!("XIC MS1 batch 10: {:.1}ms ({} chroms)", elapsed.as_secs_f64() * 1000.0, chroms.len());
             } else {
-                let mut count = 0u32;
-                for i in raw.first_scan()..=raw.last_scan() {
-                    let _ = raw.scan(i)?;
-                    count += 1;
+                let start = std::time::Instant::now();
+                if parallel {
+                    let scans = raw.scans_parallel(raw.first_scan()..raw.last_scan() + 1)?;
+                    let elapsed = start.elapsed();
+                    println!(
+                        "{} scans read in {:.1}ms ({:.1} scans/sec) [parallel, {}]",
+                        scans.len(),
+                        elapsed.as_secs_f64() * 1000.0,
+                        scans.len() as f64 / elapsed.as_secs_f64(),
+                        mode
+                    );
+                } else {
+                    let mut count = 0u32;
+                    for i in raw.first_scan()..=raw.last_scan() {
+                        let _ = raw.scan(i)?;
+                        count += 1;
+                    }
+                    let elapsed = start.elapsed();
+                    println!(
+                        "{} scans read in {:.1}ms ({:.1} scans/sec) [sequential, {}]",
+                        count,
+                        elapsed.as_secs_f64() * 1000.0,
+                        count as f64 / elapsed.as_secs_f64(),
+                        mode
+                    );
                 }
-                let elapsed = start.elapsed();
-                println!(
-                    "{} scans read in {:.1}ms ({:.1} scans/sec) [sequential, {}]",
-                    count,
-                    elapsed.as_secs_f64() * 1000.0,
-                    count as f64 / elapsed.as_secs_f64(),
-                    mode
-                );
             }
         }
     }

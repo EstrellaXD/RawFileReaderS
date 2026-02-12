@@ -288,8 +288,8 @@ fn batch_xic<'py>(
     Ok((tensor, rt_grid, result.sample_names))
 }
 
-#[pymodule]
-fn thermo_raw(m: &Bound<'_, PyModule>) -> PyResult<()> {
+#[pymodule(name = "RawFileReaderS")]
+fn raw_file_reader_s(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RawFile>()?;
     m.add_class::<ScanInfo>()?;
     m.add_function(wrap_pyfunction!(batch_xic, m)?)?;

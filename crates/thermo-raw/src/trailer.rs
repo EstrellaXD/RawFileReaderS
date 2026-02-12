@@ -282,7 +282,7 @@ pub fn find_generic_data_header(data: &[u8], spect_pos: u64) -> Result<GenericDa
     pos = search_start;
     while pos + 4 <= search_end {
         // Skip positions already checked in aligned pass
-        if pos >= aligned_start && (pos - aligned_start) % 4 == 0 {
+        if pos >= aligned_start && (pos - aligned_start).is_multiple_of(4) {
             pos += 1;
             continue;
         }
@@ -313,7 +313,7 @@ pub fn parse_trailer_extra(
     header: &GenericDataHeader,
     scan_index: u32,
 ) -> Result<TrailerExtra, RawError> {
-    let rec_size: usize = header.descriptors.iter().map(|d| field_byte_size(d)).sum();
+    let rec_size: usize = header.descriptors.iter().map(field_byte_size).sum();
     let rec_offset = header.records_offset + (scan_index as u64) * (rec_size as u64);
 
     let mut reader = BinaryReader::at_offset(data, rec_offset);

@@ -111,7 +111,7 @@ fn is_valid_stride(data: &[u8], offset: u64, n_scans: u32, stride: usize) -> boo
         }
         // RT is at offset +24 within each entry (StartTime field)
         let rt = f64::from_le_bytes(data[pos + 24..pos + 32].try_into().unwrap());
-        if rt < -0.1 || rt > 1440.0 || rt < prev_rt - 0.001 {
+        if !(-0.1..=1440.0).contains(&rt) || rt < prev_rt - 0.001 {
             return false;
         }
         prev_rt = rt;

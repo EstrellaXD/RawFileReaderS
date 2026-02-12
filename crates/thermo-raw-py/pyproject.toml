@@ -3,7 +3,7 @@ requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "thermo-raw"
+name = "RawFileReaderS"
 version = "0.1.0"
 description = "Pure Rust Thermo RAW file reader with Python bindings"
 requires-python = ">=3.9"

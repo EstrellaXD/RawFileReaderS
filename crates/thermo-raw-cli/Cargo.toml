@@ -4,8 +4,12 @@ version = "0.1.0"
 edition = "2021"
 description = "Thermo RAW file reader CLI"
 
+[lints]
+workspace = true
+
 [dependencies]
 thermo-raw = { path = "../thermo-raw" }
+thermo-raw-mzml = { path = "../thermo-raw-mzml" }
 cfb-reader = { path = "../cfb-reader" }
 clap = { workspace = true }
 anyhow = { workspace = true }

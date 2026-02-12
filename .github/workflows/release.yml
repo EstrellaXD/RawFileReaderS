@@ -1,0 +1,169 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-cli:
+    name: CLI / ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            use-cross: true
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-latest
+            use-cross: true
+            archive: tar.gz
+          - target: x86_64-apple-darwin
+            runner: macos-13
+            use-cross: false
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            use-cross: false
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            use-cross: false
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cli-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cli-${{ matrix.target }}-
+
+      - name: Install cross
+        if: matrix.use-cross
+        run: cargo install cross --locked
+
+      - name: Build CLI
+        run: |
+          ${{ matrix.use-cross && 'cross' || 'cargo' }} build \
+            --release --target ${{ matrix.target }} -p thermo-raw-cli
+        shell: bash
+
+      - name: Prepare archive (unix)
+        if: matrix.archive == 'tar.gz'
+        run: |
+          BIN="target/${{ matrix.target }}/release/thermo-raw-cli"
+          cp "$BIN" thermo-raw
+          tar czf thermo-raw-${{ matrix.target }}.tar.gz thermo-raw
+        shell: bash
+
+      - name: Prepare archive (windows)
+        if: matrix.archive == 'zip'
+        run: |
+          cp "target/${{ matrix.target }}/release/thermo-raw-cli.exe" thermo-raw.exe
+          7z a thermo-raw-${{ matrix.target }}.zip thermo-raw.exe
+        shell: bash
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.target }}
+          path: thermo-raw-${{ matrix.target }}.${{ matrix.archive }}
+          if-no-files-found: error
+
+  build-wheels:
+    name: Wheels / ${{ matrix.os }} (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux-x86_64
+            runner: ubuntu-latest
+            target: x86_64
+          - os: linux-aarch64
+            runner: ubuntu-latest
+            target: aarch64
+          - os: macos-x86_64
+            runner: macos-13
+            target: x86_64
+          - os: macos-aarch64
+            runner: macos-14
+            target: aarch64
+          - os: windows-x64
+            runner: windows-latest
+            target: x64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        if: matrix.target == 'aarch64' && runner.os == 'Linux'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist --interpreter 3.9 3.10 3.11 3.12 3.13
+          manylinux: auto
+          working-directory: crates/thermo-raw-py
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: crates/thermo-raw-py/dist/*.whl
+          if-no-files-found: error
+
+  release:
+    name: GitHub Release
+    needs: [build-cli, build-wheels]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect release assets
+        run: |
+          mkdir release-assets
+          # CLI archives
+          find artifacts/cli-* -type f \( -name '*.tar.gz' -o -name '*.zip' \) \
+            -exec cp {} release-assets/ \;
+          # Python wheels
+          find artifacts/wheels-* -type f -name '*.whl' \
+            -exec cp {} release-assets/ \;
+          echo "Release assets:"
+          ls -lh release-assets/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') }}

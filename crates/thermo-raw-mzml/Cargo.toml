@@ -1,0 +1,17 @@
+[package]
+name = "thermo-raw-mzml"
+version = "0.1.0"
+edition = "2021"
+description = "Convert Thermo RAW files to indexed mzML format"
+
+[lints]
+workspace = true
+
+[dependencies]
+thermo-raw = { path = "../thermo-raw" }
+quick-xml = "0.37"
+base64 = "0.22"
+flate2 = "1"
+sha1 = "0.10"
+rayon = { workspace = true }
+thiserror = { workspace = true }

@@ -153,9 +153,8 @@ impl RawFileInfo {
 
         // Computer name (v7+)
         if version >= 7 {
-            match reader.read_pascal_string() {
-                Ok(s) => headings.push(s),
-                Err(_) => {}
+            if let Ok(s) = reader.read_pascal_string() {
+                headings.push(s);
             }
         }
 

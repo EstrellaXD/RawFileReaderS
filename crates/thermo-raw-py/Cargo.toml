@@ -5,7 +5,7 @@ edition = "2021"
 description = "Python bindings for thermo-raw via PyO3"
 
 [lib]
-name = "thermo_raw"
+name = "RawFileReaderS"
 crate-type = ["cdylib"]
 
 [dependencies]

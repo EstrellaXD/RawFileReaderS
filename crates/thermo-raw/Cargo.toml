@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 description = "Pure Rust Thermo RAW file reader"
 
+[lints]
+workspace = true
+
 [dependencies]
 cfb-reader = { path = "../cfb-reader" }
 memmap2 = { workspace = true }
