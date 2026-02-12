@@ -112,6 +112,21 @@ impl<'a> BinaryReader<'a> {
             .to_string())
     }
 
+    /// Skip a PascalStringWin32 without allocating: read i32 length prefix, skip length * 2 bytes.
+    pub fn skip_pascal_string(&mut self) -> Result<(), RawError> {
+        let len = self.read_i32()?;
+        if len < 0 {
+            return Err(RawError::CorruptedData(format!(
+                "PascalString with negative length: {}",
+                len
+            )));
+        }
+        if len > 0 {
+            self.skip((len as usize) * 2)?;
+        }
+        Ok(())
+    }
+
     /// Read a PascalStringWin32: i32 length prefix, then length * 2 bytes of UTF-16LE.
     pub fn read_pascal_string(&mut self) -> Result<String, RawError> {
         let len = self.read_i32()?;
@@ -389,5 +404,160 @@ mod tests {
             }
             _ => panic!("Expected CorruptedData error, got {:?}", err),
         }
+    }
+
+    // Tests for skip_pascal_string()
+
+    #[test]
+    fn test_skip_pascal_string_with_valid_string() {
+        // PascalStringWin32: length=5, then "Hello" in UTF-16LE
+        let data: Vec<u8> = vec![
+            0x05, 0x00, 0x00, 0x00, // length: 5
+            0x48, 0x00, // 'H'
+            0x65, 0x00, // 'e'
+            0x6C, 0x00, // 'l'
+            0x6C, 0x00, // 'l'
+            0x6F, 0x00, // 'o'
+            0x42, 0x00, 0x00, 0x00, // trailing u32: 66
+        ];
+        let mut reader = BinaryReader::new(&data);
+
+        let start_pos = reader.position();
+        assert_eq!(start_pos, 0);
+
+        reader.skip_pascal_string().unwrap();
+
+        // Should have skipped 4 bytes (length prefix) + 10 bytes (5 * 2 for UTF-16LE)
+        assert_eq!(reader.position(), 14);
+
+        // Verify we can read the trailing data correctly
+        assert_eq!(reader.read_u32().unwrap(), 66);
+    }
+
+    #[test]
+    fn test_skip_pascal_string_with_empty_string() {
+        // PascalStringWin32: length=0 (no string data)
+        let data: Vec<u8> = vec![
+            0x00, 0x00, 0x00, 0x00, // length: 0
+            0x99, 0x00, 0x00, 0x00, // trailing u32: 153
+        ];
+        let mut reader = BinaryReader::new(&data);
+
+        reader.skip_pascal_string().unwrap();
+
+        // Should have skipped only the 4-byte length prefix
+        assert_eq!(reader.position(), 4);
+        assert_eq!(reader.read_u32().unwrap(), 153);
+    }
+
+    #[test]
+    fn test_skip_pascal_string_with_long_string() {
+        // PascalStringWin32: length=100 (200 bytes of string data)
+        let mut data: Vec<u8> = vec![0x64, 0x00, 0x00, 0x00]; // length: 100
+        data.extend(vec![0x41, 0x00].repeat(100)); // 'A' repeated 100 times in UTF-16LE
+        data.extend(vec![0xFF, 0x00, 0x00, 0x00]); // trailing u32: 255
+
+        let mut reader = BinaryReader::new(&data);
+        reader.skip_pascal_string().unwrap();
+
+        // Should have skipped 4 + (100 * 2) = 204 bytes
+        assert_eq!(reader.position(), 204);
+        assert_eq!(reader.read_u32().unwrap(), 255);
+    }
+
+    #[test]
+    fn test_skip_pascal_string_with_negative_length() {
+        // PascalStringWin32: length=-1 (invalid)
+        let data: Vec<u8> = vec![0xFF, 0xFF, 0xFF, 0xFF]; // length: -1
+        let mut reader = BinaryReader::new(&data);
+
+        let err = reader.skip_pascal_string().unwrap_err();
+        match err {
+            RawError::CorruptedData(msg) => {
+                assert!(msg.contains("negative length"));
+                assert!(msg.contains("-1"));
+            }
+            _ => panic!("Expected CorruptedData error, got {:?}", err),
+        }
+    }
+
+    #[test]
+    fn test_skip_pascal_string_insufficient_data_for_length() {
+        // Only 3 bytes available, but need 4 for length prefix
+        let data: Vec<u8> = vec![0x01, 0x02, 0x03];
+        let mut reader = BinaryReader::new(&data);
+
+        let err = reader.skip_pascal_string().unwrap_err();
+        match err {
+            RawError::CorruptedData(msg) => {
+                assert!(msg.contains("read_i32"));
+                assert!(msg.contains("need 4 bytes"));
+            }
+            _ => panic!("Expected CorruptedData error, got {:?}", err),
+        }
+    }
+
+    #[test]
+    fn test_skip_pascal_string_insufficient_data_for_string() {
+        // Length=10, but only 5 UTF-16LE chars (10 bytes) available after prefix
+        let data: Vec<u8> = vec![
+            0x0A, 0x00, 0x00, 0x00, // length: 10
+            0x41, 0x00, 0x42, 0x00, 0x43, 0x00, // only 3 chars (6 bytes)
+        ];
+        let mut reader = BinaryReader::new(&data);
+
+        let err = reader.skip_pascal_string().unwrap_err();
+        match err {
+            RawError::CorruptedData(msg) => {
+                assert!(msg.contains("skip"));
+                assert!(msg.contains("need 20 bytes")); // 10 * 2
+            }
+            _ => panic!("Expected CorruptedData error, got {:?}", err),
+        }
+    }
+
+    #[test]
+    fn test_skip_pascal_string_multiple_sequential() {
+        // Multiple PascalStrings in sequence
+        let data: Vec<u8> = vec![
+            0x02, 0x00, 0x00, 0x00, // length: 2
+            0x41, 0x00, 0x42, 0x00, // "AB"
+            0x01, 0x00, 0x00, 0x00, // length: 1
+            0x58, 0x00, // "X"
+            0x00, 0x00, 0x00, 0x00, // length: 0 (empty)
+            0x99, 0x00, 0x00, 0x00, // trailing u32: 153
+        ];
+        let mut reader = BinaryReader::new(&data);
+
+        // Skip first string: 4 + 4 = 8 bytes
+        reader.skip_pascal_string().unwrap();
+        assert_eq!(reader.position(), 8);
+
+        // Skip second string: 4 + 2 = 6 bytes
+        reader.skip_pascal_string().unwrap();
+        assert_eq!(reader.position(), 14);
+
+        // Skip third string (empty): 4 bytes
+        reader.skip_pascal_string().unwrap();
+        assert_eq!(reader.position(), 18);
+
+        // Verify trailing data
+        assert_eq!(reader.read_u32().unwrap(), 153);
+    }
+
+    #[test]
+    fn test_skip_pascal_string_at_offset() {
+        // Test skip_pascal_string with a reader starting at an offset
+        let data: Vec<u8> = vec![
+            0x00, 0x00, 0x00, 0x00, // padding
+            0x03, 0x00, 0x00, 0x00, // length: 3
+            0x41, 0x00, 0x42, 0x00, 0x43, 0x00, // "ABC"
+            0x77, 0x00, 0x00, 0x00, // trailing u32: 119
+        ];
+        let mut reader = BinaryReader::at_offset(&data, 4);
+
+        reader.skip_pascal_string().unwrap();
+        assert_eq!(reader.position(), 14); // 4 (offset) + 4 (length) + 6 (string)
+        assert_eq!(reader.read_u32().unwrap(), 119);
     }
 }

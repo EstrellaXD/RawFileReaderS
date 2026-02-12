@@ -2,6 +2,7 @@
 
 use crate::chromatogram;
 use crate::file_header::FileHeader;
+use crate::io_utils::BinaryReader;
 use crate::metadata;
 use crate::raw_file_info::RawFileInfo;
 use crate::run_header::RunHeader;
@@ -111,7 +112,8 @@ impl RawFile {
         }
 
         let info_base = finnigan_offset as u64 + FileHeader::size() as u64;
-        let raw_file_info = find_raw_file_info(&data, info_base, ver)
+        let raw_file_info = find_raw_file_info_sequential(&data, info_base, ver)
+            .or_else(|_| find_raw_file_info(&data, info_base, ver))
             .map_err(|e| parse_error("RawFileInfo", info_base, Some(ver), e))?;
 
         let rh_addr = raw_file_info.run_header_addr();
@@ -816,33 +818,40 @@ pub fn diagnose(data: &[u8]) -> DiagnosticReport {
         return DiagnosticReport { file_size, stages };
     }
 
-    // Stage 3: Find RawFileInfo
+    // Stage 3: Find RawFileInfo (sequential then fallback to search)
     let info_base = finnigan_offset as u64 + FileHeader::size() as u64;
-    let raw_file_info = match find_raw_file_info(data, info_base, ver) {
-        Ok(info) => {
-            let n_active = info.controllers.iter().filter(|c| c.offset > 0).count();
-            stages.push(DiagnosticStage {
-                name: "RawFileInfo".to_string(),
-                success: true,
-                detail: format!(
-                    "Date: {}, n_controllers: {} ({} active), end_offset: {}",
-                    info.acquisition_date(),
-                    info.n_controllers,
-                    n_active,
-                    info.end_offset
-                ),
-            });
-            info
-        }
-        Err(e) => {
-            stages.push(DiagnosticStage {
-                name: "RawFileInfo".to_string(),
-                success: false,
-                detail: format!("Search failed from offset {}: {}", info_base, e),
-            });
-            return DiagnosticReport { file_size, stages };
-        }
+    let (raw_file_info, rfi_method) = match find_raw_file_info_sequential(data, info_base, ver) {
+        Ok(info) => (info, "sequential"),
+        Err(seq_err) => match find_raw_file_info(data, info_base, ver) {
+            Ok(info) => (info, "search"),
+            Err(e) => {
+                stages.push(DiagnosticStage {
+                    name: "RawFileInfo".to_string(),
+                    success: false,
+                    detail: format!(
+                        "Sequential failed: {}\nSearch failed from offset {}: {}",
+                        seq_err, info_base, e
+                    ),
+                });
+                return DiagnosticReport { file_size, stages };
+            }
+        },
     };
+    {
+        let n_active = raw_file_info.controllers.iter().filter(|c| c.offset > 0).count();
+        stages.push(DiagnosticStage {
+            name: "RawFileInfo".to_string(),
+            success: true,
+            detail: format!(
+                "Found via {} reading\nDate: {}, n_controllers: {} ({} active), end_offset: {}",
+                rfi_method,
+                raw_file_info.acquisition_date(),
+                raw_file_info.n_controllers,
+                n_active,
+                raw_file_info.end_offset
+            ),
+        });
+    }
 
     // Stage 4: Parse RunHeader
     let rh_addr = raw_file_info.run_header_addr();
@@ -1001,6 +1010,96 @@ pub fn diagnose(data: &[u8]) -> DiagnosticReport {
     DiagnosticReport { file_size, stages }
 }
 
+/// Find RawFileInfo by sequentially reading SequenceRow + AutoSamplerConfig first.
+///
+/// The .NET DLL reads these structures in order: FileHeader -> SequenceRow ->
+/// AutoSamplerConfig -> RawFileInfo. Each consumes a known number of bytes,
+/// so the cursor always lands at the correct offset. This avoids the fragile
+/// search approach needed when intermediate structures have unknown sizes.
+fn find_raw_file_info_sequential(
+    data: &[u8],
+    info_base: u64,
+    version: u32,
+) -> Result<RawFileInfo, RawError> {
+    let mut reader = BinaryReader::at_offset(data, info_base);
+
+    skip_sequence_row(&mut reader, version)?;
+    skip_auto_sampler_config(&mut reader, version)?;
+
+    let rfi_offset = reader.position();
+    let info = RawFileInfo::parse(data, rfi_offset, version)?;
+    let file_size = data.len() as u64;
+    if info.has_valid_controllers(file_size) {
+        Ok(info)
+    } else {
+        Err(RawError::CorruptedData(format!(
+            "Sequential reading: RawFileInfo at offset {} has no valid controllers",
+            rfi_offset
+        )))
+    }
+}
+
+/// Skip past the SequenceRow structure (variable-length).
+///
+/// Layout: 60-byte fixed struct + version-dependent PascalStrings.
+/// We don't need the data, just need to advance the cursor correctly.
+fn skip_sequence_row(reader: &mut BinaryReader, version: u32) -> Result<(), RawError> {
+    // SeqRowInfoStruct: 60 bytes fixed
+    // Revision(i32) + RowNumber(i32) + SampleType(i32) + VialName(UTF16[4]=8 bytes)
+    // + InjectionVolume(f64) + SampleWeight(f64) + SampleVolume(f64)
+    // + ISTDAmount(f64) + DilutionFactor(f64)
+    reader.skip(60)?;
+
+    // 13 base PascalStrings:
+    // CalLevel, SampleName, SampleId, Comment (4)
+    // UserTexts[5] (5)
+    // Inst, Method, RawFileName, Path (4)
+    for _ in 0..13 {
+        reader.skip_pascal_string()?;
+    }
+
+    // Version-dependent strings
+    if version >= 25 {
+        // Vial, CalibFile
+        reader.skip_pascal_string()?;
+        reader.skip_pascal_string()?;
+    }
+
+    if version >= 41 {
+        // Barcode (string) + BarcodeStatus (i32)
+        reader.skip_pascal_string()?;
+        reader.skip(4)?;
+    }
+
+    if version >= 58 {
+        // ExtraUserColumns[15]
+        for _ in 0..15 {
+            reader.skip_pascal_string()?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Skip past the AutoSamplerConfig structure (version-dependent).
+///
+/// Only present for version >= 36. Layout: 24-byte fixed struct + TrayName PascalString.
+fn skip_auto_sampler_config(reader: &mut BinaryReader, version: u32) -> Result<(), RawError> {
+    if version < 36 {
+        return Ok(());
+    }
+
+    // AutoSamplerConfigStruct: 24 bytes
+    // TrayIndex(i32) + VialIndex(i32) + VialsPerTray(i32)
+    // + VialsPerTrayX(i32) + VialsPerTrayY(i32) + TrayShape(i32)
+    reader.skip(24)?;
+
+    // TrayName (PascalString)
+    reader.skip_pascal_string()?;
+
+    Ok(())
+}
+
 /// Search for a valid RawFileInfo by scanning forward from the given offset.
 ///
 /// In v66+ files, .NET serialized metadata blobs (SequencerRow, AutoSamplerInfo)
@@ -1075,4 +1174,399 @@ fn parse_error(
         "{} parsing failed at offset {}{}: {}",
         component, offset, version_str, error
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper to create a PascalStringWin32 in bytes (i32 length + UTF-16LE chars).
+    fn make_pascal_string(s: &str) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let len = s.len() as i32;
+        bytes.extend(&len.to_le_bytes());
+        for c in s.encode_utf16() {
+            bytes.extend(&c.to_le_bytes());
+        }
+        bytes
+    }
+
+    // Tests for skip_sequence_row()
+
+    #[test]
+    fn test_skip_sequence_row_version_57() {
+        // Version 57: 60 bytes + 13 base strings + 2 extra strings (version >= 25) + 2 extra (version >= 41)
+        let mut data = Vec::new();
+
+        // 60-byte fixed struct
+        data.extend(vec![0u8; 60]);
+
+        // 13 base PascalStrings (empty strings for simplicity)
+        for _ in 0..13 {
+            data.extend(&make_pascal_string(""));
+        }
+
+        // Version >= 25: Vial, CalibFile
+        data.extend(&make_pascal_string("Vial1"));
+        data.extend(&make_pascal_string("calib.cal"));
+
+        // Version >= 41: Barcode (string) + BarcodeStatus (i32)
+        data.extend(&make_pascal_string("BC12345"));
+        data.extend(&[0x01, 0x00, 0x00, 0x00]); // BarcodeStatus: 1
+
+        // Trailing marker
+        data.extend(&[0xFF, 0x00, 0x00, 0x00]); // u32: 255
+
+        let mut reader = BinaryReader::new(&data);
+
+        skip_sequence_row(&mut reader, 57).unwrap();
+
+        // Verify cursor advanced correctly (60 + 13*4 + Vial + CalibFile + Barcode + 4)
+        let expected_pos = 60 + 13 * 4 + (4 + 10) + (4 + 18) + (4 + 14) + 4;
+        assert_eq!(reader.position(), expected_pos as u64);
+
+        // Verify we can read trailing marker
+        assert_eq!(reader.read_u32().unwrap(), 255);
+    }
+
+    #[test]
+    fn test_skip_sequence_row_version_58_with_extra_columns() {
+        // Version 58: includes ExtraUserColumns[15]
+        let mut data = Vec::new();
+
+        // 60-byte fixed struct
+        data.extend(vec![0u8; 60]);
+
+        // 13 base PascalStrings
+        for i in 0..13 {
+            data.extend(&make_pascal_string(&format!("str{}", i)));
+        }
+
+        // Version >= 25: Vial, CalibFile
+        data.extend(&make_pascal_string("VialA"));
+        data.extend(&make_pascal_string("cal.dat"));
+
+        // Version >= 41: Barcode + BarcodeStatus
+        data.extend(&make_pascal_string("XYZ789"));
+        data.extend(&[0x02, 0x00, 0x00, 0x00]); // BarcodeStatus: 2
+
+        // Version >= 58: ExtraUserColumns[15]
+        for i in 0..15 {
+            data.extend(&make_pascal_string(&format!("col{}", i)));
+        }
+
+        // Trailing marker
+        data.extend(&[0xAA, 0x00, 0x00, 0x00]); // u32: 170
+
+        let mut reader = BinaryReader::new(&data);
+        skip_sequence_row(&mut reader, 58).unwrap();
+
+        // Verify we can read trailing marker
+        assert_eq!(reader.read_u32().unwrap(), 170);
+    }
+
+    #[test]
+    fn test_skip_sequence_row_version_24_minimal() {
+        // Version 24: only 60 bytes + 13 base strings (no version-dependent strings)
+        let mut data = Vec::new();
+
+        // 60-byte fixed struct
+        data.extend(vec![0u8; 60]);
+
+        // 13 base PascalStrings (empty)
+        for _ in 0..13 {
+            data.extend(&make_pascal_string(""));
+        }
+
+        // Trailing marker
+        data.extend(&[0x42, 0x00, 0x00, 0x00]); // u32: 66
+
+        let mut reader = BinaryReader::new(&data);
+        skip_sequence_row(&mut reader, 24).unwrap();
+
+        // Should have skipped exactly 60 + 13*4 = 112 bytes
+        assert_eq!(reader.position(), 112);
+        assert_eq!(reader.read_u32().unwrap(), 66);
+    }
+
+    #[test]
+    fn test_skip_sequence_row_version_25_with_vial() {
+        // Version 25: 60 bytes + 13 base + 2 extra (Vial, CalibFile), but not Barcode
+        let mut data = Vec::new();
+
+        data.extend(vec![0u8; 60]);
+        for _ in 0..13 {
+            data.extend(&make_pascal_string(""));
+        }
+
+        // Version >= 25
+        data.extend(&make_pascal_string("V1"));
+        data.extend(&make_pascal_string("C1"));
+
+        // Trailing
+        data.extend(&[0x99, 0x00, 0x00, 0x00]);
+
+        let mut reader = BinaryReader::new(&data);
+        skip_sequence_row(&mut reader, 25).unwrap();
+
+        assert_eq!(reader.read_u32().unwrap(), 153);
+    }
+
+    #[test]
+    fn test_skip_sequence_row_version_41_with_barcode() {
+        // Version 41: includes Barcode but not ExtraUserColumns
+        let mut data = Vec::new();
+
+        data.extend(vec![0u8; 60]);
+        for _ in 0..13 {
+            data.extend(&make_pascal_string(""));
+        }
+
+        // Version >= 25
+        data.extend(&make_pascal_string(""));
+        data.extend(&make_pascal_string(""));
+
+        // Version >= 41: Barcode + BarcodeStatus
+        data.extend(&make_pascal_string("ABC"));
+        data.extend(&[0x05, 0x00, 0x00, 0x00]); // BarcodeStatus: 5
+
+        // Trailing
+        data.extend(&[0x77, 0x00, 0x00, 0x00]);
+
+        let mut reader = BinaryReader::new(&data);
+        skip_sequence_row(&mut reader, 41).unwrap();
+
+        assert_eq!(reader.read_u32().unwrap(), 119);
+    }
+
+    #[test]
+    fn test_skip_sequence_row_insufficient_data_for_fixed_struct() {
+        // Only 50 bytes available, need 60 for fixed struct
+        let data = vec![0u8; 50];
+        let mut reader = BinaryReader::new(&data);
+
+        let err = skip_sequence_row(&mut reader, 57).unwrap_err();
+        match err {
+            RawError::CorruptedData(msg) => {
+                assert!(msg.contains("skip"));
+                assert!(msg.contains("need 60 bytes"));
+            }
+            _ => panic!("Expected CorruptedData error, got {:?}", err),
+        }
+    }
+
+    #[test]
+    fn test_skip_sequence_row_insufficient_data_for_strings() {
+        // Fixed struct OK, but not enough data for all strings
+        let mut data = Vec::new();
+        data.extend(vec![0u8; 60]);
+
+        // Only 5 strings instead of 13
+        for _ in 0..5 {
+            data.extend(&make_pascal_string("test"));
+        }
+
+        let mut reader = BinaryReader::new(&data);
+
+        let err = skip_sequence_row(&mut reader, 24).unwrap_err();
+        assert!(err.to_string().contains("CorruptedData") || err.to_string().contains("read_i32"));
+    }
+
+    // Tests for skip_auto_sampler_config()
+
+    #[test]
+    fn test_skip_auto_sampler_config_version_35_noop() {
+        // Version < 36: should be a no-op
+        let data = vec![0xFF, 0x00, 0x00, 0x00]; // u32: 255
+        let mut reader = BinaryReader::new(&data);
+
+        skip_auto_sampler_config(&mut reader, 35).unwrap();
+
+        // Position should not have changed
+        assert_eq!(reader.position(), 0);
+        assert_eq!(reader.read_u32().unwrap(), 255);
+    }
+
+    #[test]
+    fn test_skip_auto_sampler_config_version_24_noop() {
+        // Version < 36: should be a no-op
+        let data = vec![0xAA, 0x00, 0x00, 0x00];
+        let mut reader = BinaryReader::new(&data);
+
+        skip_auto_sampler_config(&mut reader, 24).unwrap();
+
+        assert_eq!(reader.position(), 0);
+        assert_eq!(reader.read_u32().unwrap(), 170);
+    }
+
+    #[test]
+    fn test_skip_auto_sampler_config_version_36_with_tray_name() {
+        // Version 36: 24 bytes + TrayName PascalString
+        let mut data = Vec::new();
+
+        // 24-byte fixed struct (TrayIndex, VialIndex, VialsPerTray, VialsPerTrayX, VialsPerTrayY, TrayShape)
+        data.extend(vec![0u8; 24]);
+
+        // TrayName
+        data.extend(&make_pascal_string("Tray96"));
+
+        // Trailing marker
+        data.extend(&[0x42, 0x00, 0x00, 0x00]);
+
+        let mut reader = BinaryReader::new(&data);
+        skip_auto_sampler_config(&mut reader, 36).unwrap();
+
+        // Should have skipped 24 + (4 + 12) = 40 bytes
+        assert_eq!(reader.position(), 40);
+        assert_eq!(reader.read_u32().unwrap(), 66);
+    }
+
+    #[test]
+    fn test_skip_auto_sampler_config_version_57_with_empty_tray_name() {
+        // Version 57: 24 bytes + empty TrayName
+        let mut data = Vec::new();
+
+        data.extend(vec![0u8; 24]);
+        data.extend(&make_pascal_string("")); // empty string
+
+        data.extend(&[0x99, 0x00, 0x00, 0x00]);
+
+        let mut reader = BinaryReader::new(&data);
+        skip_auto_sampler_config(&mut reader, 57).unwrap();
+
+        // Should have skipped 24 + 4 = 28 bytes
+        assert_eq!(reader.position(), 28);
+        assert_eq!(reader.read_u32().unwrap(), 153);
+    }
+
+    #[test]
+    fn test_skip_auto_sampler_config_version_66_with_long_tray_name() {
+        // Version 66: 24 bytes + long TrayName
+        let mut data = Vec::new();
+
+        data.extend(vec![0u8; 24]);
+        data.extend(&make_pascal_string("VeryLongTrayNameForTesting123"));
+
+        data.extend(&[0xFF, 0xFF, 0x00, 0x00]);
+
+        let mut reader = BinaryReader::new(&data);
+        skip_auto_sampler_config(&mut reader, 66).unwrap();
+
+        assert_eq!(reader.read_u32().unwrap(), 65535);
+    }
+
+    #[test]
+    fn test_skip_auto_sampler_config_insufficient_data_for_fixed_struct() {
+        // Only 20 bytes available, need 24
+        let data = vec![0u8; 20];
+        let mut reader = BinaryReader::new(&data);
+
+        let err = skip_auto_sampler_config(&mut reader, 36).unwrap_err();
+        match err {
+            RawError::CorruptedData(msg) => {
+                assert!(msg.contains("skip"));
+                assert!(msg.contains("need 24 bytes"));
+            }
+            _ => panic!("Expected CorruptedData error, got {:?}", err),
+        }
+    }
+
+    #[test]
+    fn test_skip_auto_sampler_config_insufficient_data_for_tray_name() {
+        // Fixed struct OK, but not enough data for TrayName
+        let mut data = Vec::new();
+        data.extend(vec![0u8; 24]);
+        data.extend(&[0x0A, 0x00, 0x00, 0x00]); // length: 10
+        data.extend(vec![0x41, 0x00]); // Only 1 char instead of 10
+
+        let mut reader = BinaryReader::new(&data);
+
+        let err = skip_auto_sampler_config(&mut reader, 36).unwrap_err();
+        match err {
+            RawError::CorruptedData(msg) => {
+                assert!(msg.contains("skip"));
+                assert!(msg.contains("need 20 bytes")); // 10 * 2
+            }
+            _ => panic!("Expected CorruptedData error, got {:?}", err),
+        }
+    }
+
+    #[test]
+    fn test_skip_auto_sampler_config_version_boundary() {
+        // Test exactly at version boundary (35 vs 36)
+        let data = vec![0x42, 0x00, 0x00, 0x00];
+
+        // Version 35: no-op
+        let mut reader = BinaryReader::new(&data);
+        skip_auto_sampler_config(&mut reader, 35).unwrap();
+        assert_eq!(reader.position(), 0);
+
+        // Version 36: should skip
+        let mut data_v36 = Vec::new();
+        data_v36.extend(vec![0u8; 24]);
+        data_v36.extend(&make_pascal_string(""));
+        data_v36.extend(&[0x42, 0x00, 0x00, 0x00]);
+
+        let mut reader_v36 = BinaryReader::new(&data_v36);
+        skip_auto_sampler_config(&mut reader_v36, 36).unwrap();
+        assert_eq!(reader_v36.position(), 28); // 24 + 4 (empty string)
+    }
+
+    // Integration test: skip_sequence_row + skip_auto_sampler_config
+
+    #[test]
+    fn test_skip_sequence_row_and_auto_sampler_config_v57() {
+        // Simulate sequential reading for version 57
+        let mut data = Vec::new();
+
+        // SequenceRow
+        data.extend(vec![0u8; 60]);
+        for _ in 0..13 {
+            data.extend(&make_pascal_string(""));
+        }
+        data.extend(&make_pascal_string("V1"));
+        data.extend(&make_pascal_string("C1"));
+        data.extend(&make_pascal_string("BC123"));
+        data.extend(&[0x01, 0x00, 0x00, 0x00]);
+
+        // AutoSamplerConfig
+        data.extend(vec![0u8; 24]);
+        data.extend(&make_pascal_string("Tray"));
+
+        // Trailing marker (simulates RawFileInfo start)
+        data.extend(&[0xFF, 0xFF, 0xFF, 0xFF]);
+
+        let mut reader = BinaryReader::new(&data);
+
+        // Skip both structures
+        skip_sequence_row(&mut reader, 57).unwrap();
+        skip_auto_sampler_config(&mut reader, 57).unwrap();
+
+        // Verify we're at the correct position to read RawFileInfo
+        assert_eq!(reader.read_u32().unwrap(), 0xFFFFFFFF);
+    }
+
+    #[test]
+    fn test_skip_sequence_row_and_auto_sampler_config_v24() {
+        // Version 24: minimal SequenceRow, no AutoSamplerConfig
+        let mut data = Vec::new();
+
+        // SequenceRow (minimal)
+        data.extend(vec![0u8; 60]);
+        for _ in 0..13 {
+            data.extend(&make_pascal_string(""));
+        }
+
+        // No AutoSamplerConfig for version < 36
+
+        // Trailing marker
+        data.extend(&[0xAA, 0xBB, 0xCC, 0xDD]);
+
+        let mut reader = BinaryReader::new(&data);
+
+        skip_sequence_row(&mut reader, 24).unwrap();
+        skip_auto_sampler_config(&mut reader, 24).unwrap(); // Should be no-op
+
+        assert_eq!(reader.read_u32().unwrap(), 0xDDCCBBAA);
+    }
 }
