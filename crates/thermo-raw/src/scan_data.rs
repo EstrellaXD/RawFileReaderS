@@ -52,6 +52,60 @@ impl PacketHeader {
     pub const SIZE: usize = 40;
 }
 
+/// Decode only centroid m/z + intensity from a scan, skipping profile data.
+///
+/// Returns `(mz_array, intensity_array)`. Used by XIC extraction to avoid
+/// decoding expensive profile data and allocating full `Scan` structs.
+pub fn decode_centroids_only(
+    data: &[u8],
+    data_addr: usize,
+    entry: &ScanIndexEntry,
+) -> Result<(Vec<f64>, Vec<f64>), RawError> {
+    let abs_offset = data_addr as u64 + entry.offset;
+
+    if entry.data_size > 0 {
+        if abs_offset as usize + entry.data_size as usize > data.len() {
+            return Ok((vec![], vec![]));
+        }
+    } else if abs_offset as usize >= data.len() {
+        return Ok((vec![], vec![]));
+    }
+
+    if entry.number_packets == 0 && entry.data_size == 0 {
+        return Ok((vec![], vec![]));
+    }
+
+    let packet_type_id = (entry.packet_type & 0xFFFF) as u16;
+
+    match packet_type_id {
+        18..=21 => scan_data_ftlt::decode_ftlt_centroids_only(data, abs_offset),
+        0..=5 | 14..=17 => decode_legacy_centroids_only(data, abs_offset),
+        _ => Ok((vec![], vec![])),
+    }
+}
+
+/// Extract only centroid data from a legacy packet, skipping profile.
+fn decode_legacy_centroids_only(
+    data: &[u8],
+    abs_offset: u64,
+) -> Result<(Vec<f64>, Vec<f64>), RawError> {
+    let mut reader = BinaryReader::at_offset(data, abs_offset);
+    let header = PacketHeader::parse(&mut reader)?;
+
+    // Skip profile data
+    if header.profile_size > 0 {
+        reader.skip(header.profile_size as usize * 4)?;
+    }
+
+    // Read centroid data
+    if header.peak_list_size > 0 {
+        let peak_start = reader.position();
+        scan_data_centroid::decode_centroid(data, peak_start as usize)
+    } else {
+        Ok((vec![], vec![]))
+    }
+}
+
 /// Decode a single scan from the data stream.
 ///
 /// `data` is the full file data. `data_addr` is the base address of the data

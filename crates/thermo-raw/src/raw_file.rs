@@ -351,18 +351,20 @@ impl RawFile {
                     return Some((entry.rt, vec![0.0; n_targets]));
                 }
 
-                let scan_num = self.run_header.first_scan + idx as u32;
-                let scan = match self.decode_scan_raw(entry, scan_num) {
-                    Ok(s) => s,
+                let (cmz, cint) = match scan_data::decode_centroids_only(
+                    &self.data,
+                    self.data_addr as usize,
+                    entry,
+                ) {
+                    Ok(pair) => pair,
                     Err(_) => return Some((entry.rt, vec![0.0; n_targets])),
                 };
 
                 let intensities: Vec<f64> = ranges
                     .iter()
                     .map(|&(low, high)| {
-                        scan.centroid_mz
-                            .iter()
-                            .zip(scan.centroid_intensity.iter())
+                        cmz.iter()
+                            .zip(cint.iter())
                             .filter(|(&mz, _)| mz >= low && mz <= high)
                             .map(|(_, &int)| int)
                             .sum()
@@ -479,9 +481,12 @@ impl RawFile {
                     if !any_overlap {
                         Some((entry.rt, vec![0.0; n_targets]))
                     } else {
-                        let scan_num = self.run_header.first_scan + idx as u32;
-                        let scan = match self.decode_scan_raw(entry, scan_num) {
-                            Ok(s) => s,
+                        let (cmz, cint) = match scan_data::decode_centroids_only(
+                            &self.data,
+                            self.data_addr as usize,
+                            entry,
+                        ) {
+                            Ok(pair) => pair,
                             Err(_) => {
                                 return {
                                     progress::tick(counter);
@@ -493,9 +498,8 @@ impl RawFile {
                         let intensities: Vec<f64> = ranges
                             .iter()
                             .map(|&(low, high)| {
-                                scan.centroid_mz
-                                    .iter()
-                                    .zip(scan.centroid_intensity.iter())
+                                cmz.iter()
+                                    .zip(cint.iter())
                                     .filter(|(&mz, _)| mz >= low && mz <= high)
                                     .map(|(_, &int)| int)
                                     .sum()
@@ -553,9 +557,12 @@ impl RawFile {
                 {
                     Some((entry.rt, 0.0))
                 } else {
-                    let scan_num = self.run_header.first_scan + idx as u32;
-                    let scan = match self.decode_scan_raw(entry, scan_num) {
-                        Ok(s) => s,
+                    let (cmz, cint) = match scan_data::decode_centroids_only(
+                        &self.data,
+                        self.data_addr as usize,
+                        entry,
+                    ) {
+                        Ok(pair) => pair,
                         Err(_) => {
                             return {
                                 progress::tick(counter);
@@ -563,10 +570,9 @@ impl RawFile {
                             }
                         }
                     };
-                    let intensity: f64 = scan
-                        .centroid_mz
+                    let intensity: f64 = cmz
                         .iter()
-                        .zip(scan.centroid_intensity.iter())
+                        .zip(cint.iter())
                         .filter(|(&mz, _)| mz >= low && mz <= high)
                         .map(|(_, &int)| int)
                         .sum();
@@ -613,15 +619,17 @@ impl RawFile {
                     return Some((entry.rt, 0.0));
                 }
 
-                let scan_num = self.run_header.first_scan + idx as u32;
-                let scan = match self.decode_scan_raw(entry, scan_num) {
-                    Ok(s) => s,
+                let (cmz, cint) = match scan_data::decode_centroids_only(
+                    &self.data,
+                    self.data_addr as usize,
+                    entry,
+                ) {
+                    Ok(pair) => pair,
                     Err(_) => return Some((entry.rt, 0.0)),
                 };
-                let intensity: f64 = scan
-                    .centroid_mz
+                let intensity: f64 = cmz
                     .iter()
-                    .zip(scan.centroid_intensity.iter())
+                    .zip(cint.iter())
                     .filter(|(&mz, _)| mz >= low && mz <= high)
                     .map(|(_, &int)| int)
                     .sum();
@@ -745,20 +753,6 @@ impl RawFile {
         let container =
             cfb_reader::Ole2Container::open(path).map_err(|e| RawError::CfbError(e.to_string()))?;
         Ok(container.list_streams())
-    }
-
-    /// Decode a scan without enrichment (no trailer/filter parsing).
-    ///
-    /// Used by XIC extraction where only centroid m/z + intensity are needed.
-    fn decode_scan_raw(&self, entry: &ScanIndexEntry, scan_number: u32) -> Result<Scan, RawError> {
-        let conversion_params = self.get_conversion_params(entry);
-        scan_data::decode_scan(
-            &self.data,
-            self.data_addr as usize,
-            entry,
-            scan_number,
-            conversion_params,
-        )
     }
 
     /// Look up conversion parameters for a scan from its ScanEvent.

@@ -276,6 +276,84 @@ fn decode_ftlt_profile(
     Ok((all_mz, all_intensity))
 }
 
+/// Decode only centroid data from an FT/LT scan packet, skipping profile entirely.
+///
+/// Returns `(mz_array, intensity_array)`. Used by XIC extraction where profile
+/// data is not needed, avoiding the expensive frequency-to-m/z conversion.
+pub fn decode_ftlt_centroids_only(
+    data: &[u8],
+    abs_offset: u64,
+) -> Result<(Vec<f64>, Vec<f64>), RawError> {
+    let mut reader = BinaryReader::at_offset(data, abs_offset);
+    let header = FtLtPacketHeader::parse(&mut reader)?;
+
+    // Skip segment mass ranges (8 bytes each)
+    reader.skip(header.num_segments as usize * 8)?;
+
+    // Skip profile data entirely
+    let profile_bytes = header.num_profile_words as usize * 4;
+    if profile_bytes > 0 {
+        reader.skip(profile_bytes)?;
+    }
+
+    // Decode centroids using batch slice reads
+    if header.num_centroid_words == 0 {
+        return Ok((vec![], vec![]));
+    }
+
+    let accurate = header.is_accurate_mass();
+    let bytes_per_peak = header.bytes_per_centroid_peak();
+    let total_centroid_bytes = header.num_centroid_words as usize * 4;
+    let estimated_peaks = if bytes_per_peak > 0 {
+        total_centroid_bytes / bytes_per_peak
+    } else {
+        0
+    };
+
+    let mut all_mz = Vec::with_capacity(estimated_peaks);
+    let mut all_intensity = Vec::with_capacity(estimated_peaks);
+
+    for _ in 0..header.num_segments {
+        let count = reader.read_u32()?;
+        if count > 10_000_000 {
+            return Err(RawError::CorruptedData(format!(
+                "FT/LT centroid: unreasonable peak count {} in segment",
+                count
+            )));
+        }
+        if count == 0 {
+            continue;
+        }
+
+        let peak_bytes = count as usize * bytes_per_peak;
+        let raw = reader.slice(peak_bytes)?;
+        reader.skip(peak_bytes)?;
+
+        if accurate {
+            for i in 0..count as usize {
+                let base = i * 12;
+                let mz = f64::from_le_bytes(raw[base..base + 8].try_into().unwrap());
+                let intensity =
+                    f32::from_le_bytes(raw[base + 8..base + 12].try_into().unwrap()) as f64;
+                all_mz.push(mz);
+                all_intensity.push(intensity);
+            }
+        } else {
+            for i in 0..count as usize {
+                let base = i * 8;
+                let mz =
+                    f32::from_le_bytes(raw[base..base + 4].try_into().unwrap()) as f64;
+                let intensity =
+                    f32::from_le_bytes(raw[base + 4..base + 8].try_into().unwrap()) as f64;
+                all_mz.push(mz);
+                all_intensity.push(intensity);
+            }
+        }
+    }
+
+    Ok((all_mz, all_intensity))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
