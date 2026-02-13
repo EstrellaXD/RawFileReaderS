@@ -116,7 +116,14 @@ pub fn decode_scan(
 
     match packet_type_id {
         // FT/LT packet types (modern instruments)
-        18..=21 => decode_scan_ftlt(data, abs_offset, entry, scan_number, packet_type_id, conversion_params),
+        18..=21 => decode_scan_ftlt(
+            data,
+            abs_offset,
+            entry,
+            scan_number,
+            packet_type_id,
+            conversion_params,
+        ),
         // Legacy packet types
         0..=5 | 14..=17 => decode_scan_legacy(data, abs_offset, entry, scan_number),
         // Unknown packet type: return empty scan
@@ -147,12 +154,8 @@ fn decode_scan_ftlt(
     packet_type_id: u16,
     conversion_params: &[f64],
 ) -> Result<Scan, RawError> {
-    let result = scan_data_ftlt::decode_ftlt_scan(
-        data,
-        abs_offset,
-        packet_type_id,
-        conversion_params,
-    )?;
+    let result =
+        scan_data_ftlt::decode_ftlt_scan(data, abs_offset, packet_type_id, conversion_params)?;
 
     Ok(Scan {
         scan_number,
@@ -189,7 +192,7 @@ fn decode_scan_legacy(
         reader.set_position(profile_start + profile_bytes as u64);
         match result {
             Ok((mz, int)) => (Some(mz), Some(int)),
-            Err(_) => (None, None)
+            Err(_) => (None, None),
         }
     } else {
         (None, None)

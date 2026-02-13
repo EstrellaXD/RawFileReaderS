@@ -56,8 +56,11 @@ pub mod type_codes {
 fn field_byte_size(desc: &GenericDataDescriptor) -> usize {
     match desc.type_code {
         type_codes::SEPARATOR => 0,
-        type_codes::BOOL | type_codes::I8 | type_codes::U8
-        | type_codes::BOOL_V66 | type_codes::FLAG => 1,
+        type_codes::BOOL
+        | type_codes::I8
+        | type_codes::U8
+        | type_codes::BOOL_V66
+        | type_codes::FLAG => 1,
         type_codes::I32 | type_codes::U32 | type_codes::F32 | type_codes::F32_ALT => 4,
         type_codes::F64 | type_codes::F64_ALT => 8,
         type_codes::ASCII | type_codes::WIDE_STRING => desc.length as usize,
@@ -254,7 +257,10 @@ const VALID_V66_TYPE_CODES: [u32; 6] = [0x00, 0x03, 0x04, 0x08, 0x0B, 0x0C];
 /// In v66 files, the GDH (field descriptors for trailer records) is stored
 /// several KB before SpectPos in the data stream, NOT at TrailerScanEventsPos
 /// or TrailerExtraPos (which point to flat record arrays with no header).
-pub fn find_generic_data_header(data: &[u8], spect_pos: u64) -> Result<GenericDataHeader, RawError> {
+pub fn find_generic_data_header(
+    data: &[u8],
+    spect_pos: u64,
+) -> Result<GenericDataHeader, RawError> {
     let search_window = 20480u64; // 20KB before SpectPos
     let search_start = spect_pos.saturating_sub(search_window) as usize;
     let search_end = spect_pos as usize;
@@ -267,9 +273,10 @@ pub fn find_generic_data_header(data: &[u8], spect_pos: u64) -> Result<GenericDa
         let n_fields = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
         if (10..=300).contains(&n_fields) {
             if let Ok(header) = parse_generic_data_header(data, pos as u64) {
-                let all_valid = header.descriptors.iter().all(|d| {
-                    VALID_V66_TYPE_CODES.contains(&d.type_code)
-                });
+                let all_valid = header
+                    .descriptors
+                    .iter()
+                    .all(|d| VALID_V66_TYPE_CODES.contains(&d.type_code));
                 if all_valid && header.descriptors.len() >= 5 {
                     return Ok(header);
                 }
@@ -289,9 +296,10 @@ pub fn find_generic_data_header(data: &[u8], spect_pos: u64) -> Result<GenericDa
         let n_fields = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
         if (10..=300).contains(&n_fields) {
             if let Ok(header) = parse_generic_data_header(data, pos as u64) {
-                let all_valid = header.descriptors.iter().all(|d| {
-                    VALID_V66_TYPE_CODES.contains(&d.type_code)
-                });
+                let all_valid = header
+                    .descriptors
+                    .iter()
+                    .all(|d| VALID_V66_TYPE_CODES.contains(&d.type_code));
                 if all_valid && header.descriptors.len() >= 5 {
                     return Ok(header);
                 }
@@ -473,6 +481,9 @@ mod tests {
         let (_, header) = build_test_data();
         let layout = TrailerLayout::from_header(header);
         let labels = layout.field_labels();
-        assert_eq!(labels, vec!["Charge State", "Monoisotopic M/Z", "Access Id"]);
+        assert_eq!(
+            labels,
+            vec!["Charge State", "Monoisotopic M/Z", "Access Id"]
+        );
     }
 }

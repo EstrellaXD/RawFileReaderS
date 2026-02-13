@@ -29,7 +29,7 @@ fn build_profile_data(first_value: f64, step: f64, first_bin: u32, signals: &[f3
     buf.extend_from_slice(&step.to_le_bytes());
     buf.extend_from_slice(&1u32.to_le_bytes()); // peak_count = 1
     buf.extend_from_slice(&(signals.len() as u32).to_le_bytes()); // nbins_total
-    // Chunk: first_bin, nbins, signals
+                                                                  // Chunk: first_bin, nbins, signals
     buf.extend_from_slice(&first_bin.to_le_bytes());
     buf.extend_from_slice(&(signals.len() as u32).to_le_bytes());
     for s in signals {
@@ -121,7 +121,7 @@ fn test_profile_decode_with_fudge() {
     data.extend_from_slice(&step.to_le_bytes());
     data.extend_from_slice(&1u32.to_le_bytes()); // peak_count
     data.extend_from_slice(&3u32.to_le_bytes()); // nbins_total
-    // Chunk with fudge
+                                                 // Chunk with fudge
     data.extend_from_slice(&10u32.to_le_bytes()); // first_bin = 10
     data.extend_from_slice(&3u32.to_le_bytes()); // nbins = 3
     data.extend_from_slice(&0.001f32.to_le_bytes()); // fudge
@@ -196,8 +196,7 @@ fn test_scan_event_preamble_all_fields() {
     // n_source_frag_mass_ranges = 0
     data.extend_from_slice(&0u32.to_le_bytes());
 
-    let (event, _end_pos) =
-        thermo_raw::scan_event::parse_scan_event(&data, 0, 57).unwrap();
+    let (event, _end_pos) = thermo_raw::scan_event::parse_scan_event(&data, 0, 57).unwrap();
 
     assert_eq!(event.preamble.polarity, thermo_raw::Polarity::Positive);
     assert_eq!(event.preamble.scan_mode, ScanMode::Centroid);
@@ -339,8 +338,7 @@ fn test_serde_roundtrip_scan_event() {
     };
 
     let json = serde_json::to_string(&event).unwrap();
-    let deserialized: thermo_raw::scan_event::ScanEvent =
-        serde_json::from_str(&json).unwrap();
+    let deserialized: thermo_raw::scan_event::ScanEvent = serde_json::from_str(&json).unwrap();
     assert_eq!(deserialized.preamble.analyzer, AnalyzerType::Ftms);
     assert_eq!(deserialized.conversion_params.len(), 4);
 }

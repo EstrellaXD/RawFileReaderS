@@ -4,6 +4,7 @@ use crate::chromatogram;
 use crate::file_header::FileHeader;
 use crate::io_utils::BinaryReader;
 use crate::metadata;
+use crate::progress::{self, ProgressCounter};
 use crate::raw_file_info::RawFileInfo;
 use crate::run_header::RunHeader;
 use crate::scan_data;
@@ -315,10 +316,7 @@ impl RawFile {
     ///
     /// Decodes each MS1 scan once and extracts intensities for all targets,
     /// avoiding redundant scan decoding when extracting multiple XICs.
-    pub fn xic_batch_ms1(
-        &self,
-        targets: &[(f64, f64)],
-    ) -> Result<Vec<Chromatogram>, RawError> {
+    pub fn xic_batch_ms1(&self, targets: &[(f64, f64)]) -> Result<Vec<Chromatogram>, RawError> {
         use rayon::prelude::*;
 
         let ranges: Vec<(f64, f64)> = targets
@@ -394,6 +392,198 @@ impl RawFile {
         Ok(chromatograms)
     }
 
+    /// Like [`scans_parallel`], but increments the progress counter after each scan.
+    pub fn scans_parallel_with_progress(
+        &self,
+        range: std::ops::Range<u32>,
+        counter: &ProgressCounter,
+    ) -> Result<Vec<Scan>, RawError> {
+        use rayon::prelude::*;
+        let first = self.run_header.first_scan;
+        let entries: Vec<_> = range
+            .map(|n| ((n - first) as usize, n))
+            .filter_map(|(idx, n)| self.scan_index.get(idx).map(|e| (e, n, idx as u32)))
+            .collect();
+
+        entries
+            .par_iter()
+            .map(|(entry, scan_num, scan_idx)| {
+                let conversion_params = self.get_conversion_params(entry);
+                let mut scan = scan_data::decode_scan(
+                    &self.data,
+                    self.data_addr as usize,
+                    entry,
+                    *scan_num,
+                    conversion_params,
+                )?;
+                self.enrich_scan(&mut scan, *scan_idx);
+                progress::tick(counter);
+                Ok(scan)
+            })
+            .collect()
+    }
+
+    /// Like [`xic`], but increments the progress counter per scan index entry.
+    pub fn xic_with_progress(
+        &self,
+        target_mz: f64,
+        tolerance_ppm: f64,
+        counter: &ProgressCounter,
+    ) -> Result<Chromatogram, RawError> {
+        self.xic_inner_with_progress(target_mz, tolerance_ppm, false, counter)
+    }
+
+    /// Like [`xic_ms1`], but increments the progress counter per scan index entry.
+    pub fn xic_ms1_with_progress(
+        &self,
+        target_mz: f64,
+        tolerance_ppm: f64,
+        counter: &ProgressCounter,
+    ) -> Result<Chromatogram, RawError> {
+        self.xic_inner_with_progress(target_mz, tolerance_ppm, true, counter)
+    }
+
+    /// Like [`xic_batch_ms1`], but increments the progress counter per scan index entry.
+    pub fn xic_batch_ms1_with_progress(
+        &self,
+        targets: &[(f64, f64)],
+        counter: &ProgressCounter,
+    ) -> Result<Vec<Chromatogram>, RawError> {
+        use rayon::prelude::*;
+
+        let ranges: Vec<(f64, f64)> = targets
+            .iter()
+            .map(|&(mz, ppm)| {
+                let half = mz * ppm * 1e-6;
+                (mz - half, mz + half)
+            })
+            .collect();
+        let n_targets = targets.len();
+
+        let per_scan: Vec<Option<(f64, Vec<f64>)>> = self
+            .scan_index
+            .par_iter()
+            .enumerate()
+            .map(|(idx, entry)| {
+                let result = if !self.is_ms1_scan(idx as u32) {
+                    None
+                } else {
+                    let any_overlap = if entry.low_mz > 0.0 && entry.high_mz > 0.0 {
+                        ranges
+                            .iter()
+                            .any(|&(low, high)| entry.high_mz >= low && entry.low_mz <= high)
+                    } else {
+                        true
+                    };
+
+                    if !any_overlap {
+                        Some((entry.rt, vec![0.0; n_targets]))
+                    } else {
+                        let scan_num = self.run_header.first_scan + idx as u32;
+                        let scan = match self.decode_scan_raw(entry, scan_num) {
+                            Ok(s) => s,
+                            Err(_) => {
+                                return {
+                                    progress::tick(counter);
+                                    Some((entry.rt, vec![0.0; n_targets]))
+                                }
+                            }
+                        };
+
+                        let intensities: Vec<f64> = ranges
+                            .iter()
+                            .map(|&(low, high)| {
+                                scan.centroid_mz
+                                    .iter()
+                                    .zip(scan.centroid_intensity.iter())
+                                    .filter(|(&mz, _)| mz >= low && mz <= high)
+                                    .map(|(_, &int)| int)
+                                    .sum()
+                            })
+                            .collect();
+
+                        Some((entry.rt, intensities))
+                    }
+                };
+                progress::tick(counter);
+                result
+            })
+            .collect();
+
+        let filtered: Vec<_> = per_scan.into_iter().flatten().collect();
+        let mut rts: Vec<f64> = filtered.iter().map(|(rt, _)| *rt).collect();
+
+        let mut chromatograms = Vec::with_capacity(n_targets);
+        for t in 0..n_targets {
+            let intensity = filtered.iter().map(|(_, ints)| ints[t]).collect();
+            let rt = if t + 1 < n_targets {
+                rts.clone()
+            } else {
+                std::mem::take(&mut rts)
+            };
+            chromatograms.push(Chromatogram { rt, intensity });
+        }
+
+        Ok(chromatograms)
+    }
+
+    /// Internal XIC with progress, shared between `xic_with_progress()` and `xic_ms1_with_progress()`.
+    fn xic_inner_with_progress(
+        &self,
+        target_mz: f64,
+        tolerance_ppm: f64,
+        ms1_only: bool,
+        counter: &ProgressCounter,
+    ) -> Result<Chromatogram, RawError> {
+        use rayon::prelude::*;
+        let half_width = target_mz * tolerance_ppm * 1e-6;
+        let low = target_mz - half_width;
+        let high = target_mz + half_width;
+
+        let results: Vec<Option<(f64, f64)>> = self
+            .scan_index
+            .par_iter()
+            .enumerate()
+            .map(|(idx, entry)| {
+                let result = if ms1_only && !self.is_ms1_scan(idx as u32) {
+                    None
+                } else if entry.low_mz > 0.0
+                    && entry.high_mz > 0.0
+                    && (entry.high_mz < low || entry.low_mz > high)
+                {
+                    Some((entry.rt, 0.0))
+                } else {
+                    let scan_num = self.run_header.first_scan + idx as u32;
+                    let scan = match self.decode_scan_raw(entry, scan_num) {
+                        Ok(s) => s,
+                        Err(_) => {
+                            return {
+                                progress::tick(counter);
+                                Some((entry.rt, 0.0))
+                            }
+                        }
+                    };
+                    let intensity: f64 = scan
+                        .centroid_mz
+                        .iter()
+                        .zip(scan.centroid_intensity.iter())
+                        .filter(|(&mz, _)| mz >= low && mz <= high)
+                        .map(|(_, &int)| int)
+                        .sum();
+                    Some((entry.rt, intensity))
+                };
+                progress::tick(counter);
+                result
+            })
+            .collect();
+
+        let filtered: Vec<_> = results.into_iter().flatten().collect();
+        Ok(Chromatogram {
+            rt: filtered.iter().map(|(rt, _)| *rt).collect(),
+            intensity: filtered.iter().map(|(_, int)| *int).collect(),
+        })
+    }
+
     /// Internal XIC implementation shared between `xic()` and `xic_ms1()`.
     fn xic_inner(
         &self,
@@ -416,7 +606,8 @@ impl RawFile {
                 }
 
                 // Pre-filter: skip scans whose m/z range doesn't overlap the target
-                if entry.low_mz > 0.0 && entry.high_mz > 0.0
+                if entry.low_mz > 0.0
+                    && entry.high_mz > 0.0
                     && (entry.high_mz < low || entry.low_mz > high)
                 {
                     return Some((entry.rt, 0.0));
@@ -471,10 +662,7 @@ impl RawFile {
     }
 
     /// Get trailer extra data for a specific scan as a HashMap.
-    pub fn trailer_extra(
-        &self,
-        scan_number: u32,
-    ) -> Result<HashMap<String, String>, RawError> {
+    pub fn trailer_extra(&self, scan_number: u32) -> Result<HashMap<String, String>, RawError> {
         let layout = self
             .trailer_layout
             .as_ref()
@@ -554,8 +742,8 @@ impl RawFile {
 
     /// List OLE2 streams in the file (uses cfb-reader).
     pub fn list_streams(path: impl AsRef<Path>) -> Result<Vec<String>, RawError> {
-        let container = cfb_reader::Ole2Container::open(path)
-            .map_err(|e| RawError::CfbError(e.to_string()))?;
+        let container =
+            cfb_reader::Ole2Container::open(path).map_err(|e| RawError::CfbError(e.to_string()))?;
         Ok(container.list_streams())
     }
 
@@ -564,7 +752,13 @@ impl RawFile {
     /// Used by XIC extraction where only centroid m/z + intensity are needed.
     fn decode_scan_raw(&self, entry: &ScanIndexEntry, scan_number: u32) -> Result<Scan, RawError> {
         let conversion_params = self.get_conversion_params(entry);
-        scan_data::decode_scan(&self.data, self.data_addr as usize, entry, scan_number, conversion_params)
+        scan_data::decode_scan(
+            &self.data,
+            self.data_addr as usize,
+            entry,
+            scan_number,
+            conversion_params,
+        )
     }
 
     /// Look up conversion parameters for a scan from its ScanEvent.
@@ -595,8 +789,7 @@ impl RawFile {
                         scan.filter_string = Some(filter_str);
 
                         if !matches!(scan.ms_level, MsLevel::Ms1) {
-                            scan.precursor =
-                                self.build_precursor_info(layout, scan_idx, &filter);
+                            scan.precursor = self.build_precursor_info(layout, scan_idx, &filter);
                         }
                         enriched = true;
                     }
@@ -838,7 +1031,11 @@ pub fn diagnose(data: &[u8]) -> DiagnosticReport {
         },
     };
     {
-        let n_active = raw_file_info.controllers.iter().filter(|c| c.offset > 0).count();
+        let n_active = raw_file_info
+            .controllers
+            .iter()
+            .filter(|c| c.offset > 0)
+            .count();
         stages.push(DiagnosticStage {
             name: "RawFileInfo".to_string(),
             success: true,
@@ -874,12 +1071,18 @@ pub fn diagnose(data: &[u8]) -> DiagnosticReport {
                      ScanIndex64: {:?}, DataAddr64: {:?}\n\
                      TrailerAddr64: {:?}, ParamsAddr64: {:?}\n\
                      Device: {}, Model: {}",
-                    rh.first_scan, rh.last_scan,
-                    rh.start_time, rh.end_time,
-                    rh.low_mass, rh.high_mass,
-                    rh.scan_index_addr_64, rh.data_addr_64,
-                    rh.scan_trailer_addr_64, rh.scan_params_addr_64,
-                    rh.device_name, rh.model,
+                    rh.first_scan,
+                    rh.last_scan,
+                    rh.start_time,
+                    rh.end_time,
+                    rh.low_mass,
+                    rh.high_mass,
+                    rh.scan_index_addr_64,
+                    rh.data_addr_64,
+                    rh.scan_trailer_addr_64,
+                    rh.scan_params_addr_64,
+                    rh.device_name,
+                    rh.model,
                 ),
             });
             rh
@@ -921,7 +1124,10 @@ pub fn diagnose(data: &[u8]) -> DiagnosticReport {
             stages.push(DiagnosticStage {
                 name: "ScanIndex".to_string(),
                 success: false,
-                detail: format!("Parse error at offset {} ({} scans): {}", si_addr, n_scans, e),
+                detail: format!(
+                    "Parse error at offset {} ({} scans): {}",
+                    si_addr, n_scans, e
+                ),
             });
             return DiagnosticReport { file_size, stages };
         }
@@ -937,8 +1143,7 @@ pub fn diagnose(data: &[u8]) -> DiagnosticReport {
             .or_else(|_| {
                 let addr = run_header.scan_trailer_addr();
                 if addr > 0 {
-                    trailer::parse_generic_data_header(data, addr)
-                        .map(TrailerLayout::from_header)
+                    trailer::parse_generic_data_header(data, addr).map(TrailerLayout::from_header)
                 } else {
                     Err(RawError::StreamNotFound("No trailer address".to_string()))
                 }
@@ -1078,6 +1283,14 @@ fn skip_sequence_row(reader: &mut BinaryReader, version: u32) -> Result<(), RawE
         }
     }
 
+    // Note: v66+ files written by newer acquisition software may have additional
+    // PascalStrings after ExtraUserColumns (e.g., SampleExtensionInfo JSON blobs).
+    // These extra strings are NOT part of the standard SequenceRow.Load code in
+    // Thermo's v8.0.6 library. We don't try to consume them here because it's
+    // impossible to reliably distinguish extra PascalStrings from the start of
+    // AutoSamplerConfig (whose TrayIndex=0 looks like an empty PascalString).
+    // The fallback scanner in find_raw_file_info() handles these files correctly.
+
     Ok(())
 }
 
@@ -1104,33 +1317,24 @@ fn skip_auto_sampler_config(reader: &mut BinaryReader, version: u32) -> Result<(
 ///
 /// In v66+ files, .NET serialized metadata blobs (SequencerRow, AutoSamplerInfo)
 /// sit between the FileHeader and RawFileInfo. This function scans forward in
-/// 4-byte steps, attempting to parse RawFileInfo at each candidate offset and
-/// validating the result by checking whether VCI entries contain plausible
-/// MS controller addresses within the file.
-fn find_raw_file_info(
-    data: &[u8],
-    start: u64,
-    version: u32,
-) -> Result<RawFileInfo, RawError> {
+/// 2-byte steps, attempting to parse RawFileInfo at each candidate offset and
+/// validating the result by checking both VCI entries and RunHeader reachability.
+fn find_raw_file_info(data: &[u8], start: u64, version: u32) -> Result<RawFileInfo, RawError> {
     let file_size = data.len() as u64;
     // Search up to 16KB past the FileHeader (more than enough for any blob)
     let search_limit = (start + 16384).min(file_size);
 
-    // Try the standard offset first (no intermediate structures)
-    if let Ok(info) = RawFileInfo::parse(data, start, version) {
-        if info.has_valid_controllers(file_size) {
-            return Ok(info);
-        }
-    }
-
-    // Scan forward for valid RawFileInfo.
-    // Step by 2 bytes (not 4) because .NET blobs preceding RawFileInfo have
-    // variable size with no alignment guarantee.
-    let mut offset = start + 2;
+    let mut offset = start;
     while offset < search_limit {
         if let Ok(info) = RawFileInfo::parse(data, offset, version) {
             if info.has_valid_controllers(file_size) {
-                return Ok(info);
+                // Additional validation: verify the RunHeader at the MS address
+                // is actually parseable. This eliminates false positives where
+                // random data in SequenceRow/ASC looks like valid VCI entries.
+                let rh_addr = info.run_header_addr();
+                if rh_addr > 0 && RunHeader::parse(data, rh_addr, version).is_ok() {
+                    return Ok(info);
+                }
             }
         }
         offset += 2;

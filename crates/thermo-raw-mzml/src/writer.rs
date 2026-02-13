@@ -10,6 +10,7 @@ use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::Writer;
 use sha1::{Digest, Sha1};
 use std::io::Write;
+use thermo_raw::progress::{self, ProgressCounter};
 use thermo_raw::scan_event::{AnalyzerType, IonizationType, ScanMode};
 use thermo_raw::types::MsLevel;
 use thermo_raw::RawFile;
@@ -131,6 +132,152 @@ pub fn write_mzml<W: Write>(
     }
 }
 
+/// Write a complete indexed mzML document, ticking the counter after each scan.
+pub fn write_mzml_with_progress<W: Write>(
+    raw: &RawFile,
+    output: W,
+    config: &MzmlConfig,
+    source_filename: &str,
+    counter: &ProgressCounter,
+) -> Result<(), MzmlError> {
+    let n_scans = raw.n_scans();
+    let instrument = detect_instrument(raw);
+    let _has_profile = has_profile_data(raw);
+    let n_chromatograms = 2u32;
+
+    if config.write_index {
+        write_indexed_mzml_with_progress(
+            raw,
+            output,
+            config,
+            source_filename,
+            n_scans,
+            n_chromatograms,
+            &instrument,
+            counter,
+        )
+    } else {
+        write_plain_mzml_with_progress(
+            raw,
+            output,
+            config,
+            source_filename,
+            n_scans,
+            n_chromatograms,
+            &instrument,
+            counter,
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_plain_mzml_with_progress<W: Write>(
+    raw: &RawFile,
+    output: W,
+    config: &MzmlConfig,
+    source_filename: &str,
+    n_scans: u32,
+    n_chromatograms: u32,
+    instrument: &InstrumentInfo,
+    counter: &ProgressCounter,
+) -> Result<(), MzmlError> {
+    let counting = CountingWriter::new(output);
+    let mut writer = Writer::new_with_indent(counting, b' ', 2);
+    writer.write_event(Event::Decl(BytesDecl::new("1.0", Some("utf-8"), None)))?;
+
+    write_mzml_body(
+        &mut writer,
+        raw,
+        config,
+        source_filename,
+        n_scans,
+        n_chromatograms,
+        instrument,
+        &mut Vec::new(),
+        &mut Vec::new(),
+        false,
+        Some(counter),
+    )?;
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_indexed_mzml_with_progress<W: Write>(
+    raw: &RawFile,
+    output: W,
+    config: &MzmlConfig,
+    source_filename: &str,
+    n_scans: u32,
+    n_chromatograms: u32,
+    instrument: &InstrumentInfo,
+    counter: &ProgressCounter,
+) -> Result<(), MzmlError> {
+    let counting = CountingWriter::new(output);
+    let mut writer = Writer::new_with_indent(counting, b' ', 2);
+    writer.write_event(Event::Decl(BytesDecl::new("1.0", Some("utf-8"), None)))?;
+    writer
+        .get_mut()
+        .write_all(b"\n")
+        .map_err(quick_xml::Error::from)?;
+
+    let mut indexed_start = BytesStart::new("indexedmzML");
+    indexed_start.push_attribute(("xmlns", "http://psi.hupo.org/ms/mzml"));
+    indexed_start.push_attribute(("xmlns:xsi", "http://www.w3.org/2001/XMLSchema-instance"));
+    indexed_start.push_attribute((
+        "xsi:schemaLocation",
+        "http://psi.hupo.org/ms/mzml http://psidev.info/files/ms/mzML/xsd/mzML1.1.2_idx.xsd",
+    ));
+    writer.write_event(Event::Start(indexed_start))?;
+
+    let mut spectrum_offsets: Vec<(String, u64)> = Vec::with_capacity(n_scans as usize);
+    let mut chromatogram_offsets: Vec<(String, u64)> = Vec::with_capacity(n_chromatograms as usize);
+
+    write_mzml_body(
+        &mut writer,
+        raw,
+        config,
+        source_filename,
+        n_scans,
+        n_chromatograms,
+        instrument,
+        &mut spectrum_offsets,
+        &mut chromatogram_offsets,
+        true,
+        Some(counter),
+    )?;
+
+    let index_list_offset = writer.get_ref().position();
+
+    let mut idx_list = BytesStart::new("indexList");
+    idx_list.push_attribute(("count", "2"));
+    writer.write_event(Event::Start(idx_list))?;
+
+    write_index(&mut writer, "spectrum", &spectrum_offsets)?;
+    write_index(&mut writer, "chromatogram", &chromatogram_offsets)?;
+
+    writer.write_event(Event::End(BytesEnd::new("indexList")))?;
+
+    writer.write_event(Event::Start(BytesStart::new("indexListOffset")))?;
+    writer.write_event(Event::Text(BytesText::new(&index_list_offset.to_string())))?;
+    writer.write_event(Event::End(BytesEnd::new("indexListOffset")))?;
+
+    let hash = writer.get_ref().finish_hash();
+    writer.write_event(Event::Start(BytesStart::new("fileChecksum")))?;
+    writer.write_event(Event::Text(BytesText::new(&hash)))?;
+    writer.write_event(Event::End(BytesEnd::new("fileChecksum")))?;
+
+    writer.write_event(Event::End(BytesEnd::new("indexedmzML")))?;
+
+    writer
+        .into_inner()
+        .into_inner()
+        .write_all(b"\n")
+        .map_err(quick_xml::Error::from)?;
+
+    Ok(())
+}
+
 fn write_plain_mzml<W: Write>(
     raw: &RawFile,
     output: W,
@@ -158,6 +305,7 @@ fn write_plain_mzml<W: Write>(
         &mut Vec::new(),
         &mut Vec::new(),
         false,
+        None,
     )?;
 
     Ok(())
@@ -186,10 +334,7 @@ fn write_indexed_mzml<W: Write>(
     // <indexedmzML>
     let mut indexed_start = BytesStart::new("indexedmzML");
     indexed_start.push_attribute(("xmlns", "http://psi.hupo.org/ms/mzml"));
-    indexed_start.push_attribute((
-        "xmlns:xsi",
-        "http://www.w3.org/2001/XMLSchema-instance",
-    ));
+    indexed_start.push_attribute(("xmlns:xsi", "http://www.w3.org/2001/XMLSchema-instance"));
     indexed_start.push_attribute((
         "xsi:schemaLocation",
         "http://psi.hupo.org/ms/mzml http://psidev.info/files/ms/mzML/xsd/mzML1.1.2_idx.xsd",
@@ -210,6 +355,7 @@ fn write_indexed_mzml<W: Write>(
         &mut spectrum_offsets,
         &mut chromatogram_offsets,
         true,
+        None,
     )?;
 
     // <indexList>
@@ -290,14 +436,12 @@ fn write_mzml_body<W: Write>(
     spectrum_offsets: &mut Vec<(String, u64)>,
     chromatogram_offsets: &mut Vec<(String, u64)>,
     track_offsets: bool,
+    progress_counter: Option<&ProgressCounter>,
 ) -> Result<(), MzmlError> {
     // <mzML>
     let mut mzml_start = BytesStart::new("mzML");
     mzml_start.push_attribute(("xmlns", "http://psi.hupo.org/ms/mzml"));
-    mzml_start.push_attribute((
-        "xmlns:xsi",
-        "http://www.w3.org/2001/XMLSchema-instance",
-    ));
+    mzml_start.push_attribute(("xmlns:xsi", "http://www.w3.org/2001/XMLSchema-instance"));
     mzml_start.push_attribute((
         "xsi:schemaLocation",
         "http://psi.hupo.org/ms/mzml http://psidev.info/files/ms/mzML/xsd/mzML1.1.0.xsd",
@@ -353,6 +497,9 @@ fn write_mzml_body<W: Write>(
                 write_empty_spectrum(writer, scan_num, scan_idx, &spectrum_id)?;
             }
         }
+        if let Some(c) = progress_counter {
+            progress::tick(c);
+        }
     }
 
     writer.write_event(Event::End(BytesEnd::new("spectrumList")))?;
@@ -371,7 +518,15 @@ fn write_mzml_body<W: Write>(
             chromatogram_offsets.push((tic_id.to_string(), offset));
         }
         let tic = raw.tic();
-        write_chromatogram(writer, tic_id, 0, &tic.rt, &tic.intensity, cv::TIC_CHROMATOGRAM, config)?;
+        write_chromatogram(
+            writer,
+            tic_id,
+            0,
+            &tic.rt,
+            &tic.intensity,
+            cv::TIC_CHROMATOGRAM,
+            config,
+        )?;
     }
 
     // BPC
@@ -382,7 +537,15 @@ fn write_mzml_body<W: Write>(
             chromatogram_offsets.push((bpc_id.to_string(), offset));
         }
         let bpc = raw.bpc();
-        write_chromatogram(writer, bpc_id, 1, &bpc.rt, &bpc.intensity, cv::BPC_CHROMATOGRAM, config)?;
+        write_chromatogram(
+            writer,
+            bpc_id,
+            1,
+            &bpc.rt,
+            &bpc.intensity,
+            cv::BPC_CHROMATOGRAM,
+            config,
+        )?;
     }
 
     writer.write_event(Event::End(BytesEnd::new("chromatogramList")))?;
@@ -392,7 +555,6 @@ fn write_mzml_body<W: Write>(
     Ok(())
 }
 
-
 /// Write the <cvList> element.
 fn write_cv_list<W: Write>(writer: &mut Writer<W>) -> Result<(), MzmlError> {
     let mut cv_list = BytesStart::new("cvList");
@@ -401,9 +563,15 @@ fn write_cv_list<W: Write>(writer: &mut Writer<W>) -> Result<(), MzmlError> {
 
     let mut cv_ms = BytesStart::new("cv");
     cv_ms.push_attribute(("id", "MS"));
-    cv_ms.push_attribute(("fullName", "Proteomics Standards Initiative Mass Spectrometry Ontology"));
+    cv_ms.push_attribute((
+        "fullName",
+        "Proteomics Standards Initiative Mass Spectrometry Ontology",
+    ));
     cv_ms.push_attribute(("version", "4.1.30"));
-    cv_ms.push_attribute(("URI", "https://raw.githubusercontent.com/HUPO-PSI/psi-ms-CV/master/psi-ms.obo"));
+    cv_ms.push_attribute((
+        "URI",
+        "https://raw.githubusercontent.com/HUPO-PSI/psi-ms-CV/master/psi-ms.obo",
+    ));
     writer.write_event(Event::Empty(cv_ms))?;
 
     let mut cv_uo = BytesStart::new("cv");
@@ -428,7 +596,13 @@ fn write_file_description<W: Write>(
     writer.write_event(Event::Start(BytesStart::new("fileContent")))?;
     write_cv_param(writer, cv::MS1_CONTENT, "MS1 spectrum", None, None)?;
     write_cv_param(writer, cv::MSN_CONTENT, "MSn spectrum", None, None)?;
-    write_cv_param(writer, cv::CENTROID_CONTENT, "centroid spectrum", None, None)?;
+    write_cv_param(
+        writer,
+        cv::CENTROID_CONTENT,
+        "centroid spectrum",
+        None,
+        None,
+    )?;
     writer.write_event(Event::End(BytesEnd::new("fileContent")))?;
 
     // <sourceFileList>
@@ -441,7 +615,13 @@ fn write_file_description<W: Write>(
     sf.push_attribute(("name", source_filename));
     sf.push_attribute(("location", "file:///"));
     writer.write_event(Event::Start(sf))?;
-    write_cv_param(writer, cv::THERMO_RAW_FORMAT, "Thermo RAW format", None, None)?;
+    write_cv_param(
+        writer,
+        cv::THERMO_RAW_FORMAT,
+        "Thermo RAW format",
+        None,
+        None,
+    )?;
     writer.write_event(Event::End(BytesEnd::new("sourceFile")))?;
 
     writer.write_event(Event::End(BytesEnd::new("sourceFileList")))?;
@@ -459,7 +639,13 @@ fn write_software_list<W: Write>(writer: &mut Writer<W>) -> Result<(), MzmlError
     sw.push_attribute(("id", "thermo-raw-mzml"));
     sw.push_attribute(("version", env!("CARGO_PKG_VERSION")));
     writer.write_event(Event::Start(sw))?;
-    write_cv_param(writer, "MS:1000799", "custom unreleased software tool", Some("thermo-raw-mzml"), None)?;
+    write_cv_param(
+        writer,
+        "MS:1000799",
+        "custom unreleased software tool",
+        Some("thermo-raw-mzml"),
+        None,
+    )?;
     writer.write_event(Event::End(BytesEnd::new("software")))?;
 
     writer.write_event(Event::End(BytesEnd::new("softwareList")))?;
@@ -483,9 +669,21 @@ fn write_instrument_config<W: Write>(
     writer.write_event(Event::Start(ic))?;
 
     // Instrument model
-    write_cv_param(writer, cv::INSTRUMENT_MODEL, &meta.instrument_model, None, None)?;
+    write_cv_param(
+        writer,
+        cv::INSTRUMENT_MODEL,
+        &meta.instrument_model,
+        None,
+        None,
+    )?;
     // Serial number
-    write_cv_param(writer, cv::INSTRUMENT_SERIAL, "instrument serial number", Some(&meta.serial_number), None)?;
+    write_cv_param(
+        writer,
+        cv::INSTRUMENT_SERIAL,
+        "instrument serial number",
+        Some(&meta.serial_number),
+        None,
+    )?;
 
     // <componentList>
     let mut comp_list = BytesStart::new("componentList");
@@ -545,7 +743,13 @@ fn write_data_processing<W: Write>(writer: &mut Writer<W>) -> Result<(), MzmlErr
     pm.push_attribute(("order", "1"));
     pm.push_attribute(("softwareRef", "thermo-raw-mzml"));
     writer.write_event(Event::Start(pm))?;
-    write_cv_param(writer, cv::CONVERSION_TO_MZML, "Conversion to mzML", None, None)?;
+    write_cv_param(
+        writer,
+        cv::CONVERSION_TO_MZML,
+        "Conversion to mzML",
+        None,
+        None,
+    )?;
     writer.write_event(Event::End(BytesEnd::new("processingMethod")))?;
 
     writer.write_event(Event::End(BytesEnd::new("dataProcessing")))?;
@@ -572,8 +776,20 @@ fn write_spectrum<W: Write>(
 
     // Spectrum type CV params
     write_cv_param(writer, cv::spectrum_type(&scan.ms_level), "", None, None)?;
-    write_cv_param(writer, cv::MS_LEVEL, "ms level", Some(cv::ms_level_value(&scan.ms_level)), None)?;
-    write_cv_param(writer, cv::CENTROID_SPECTRUM, "centroid spectrum", None, None)?;
+    write_cv_param(
+        writer,
+        cv::MS_LEVEL,
+        "ms level",
+        Some(cv::ms_level_value(&scan.ms_level)),
+        None,
+    )?;
+    write_cv_param(
+        writer,
+        cv::CENTROID_SPECTRUM,
+        "centroid spectrum",
+        None,
+        None,
+    )?;
 
     // Polarity
     if let Some(pol_acc) = cv::polarity_accession(&scan.polarity) {
@@ -581,16 +797,46 @@ fn write_spectrum<W: Write>(
     }
 
     // Base peak and TIC
-    write_cv_param(writer, cv::BASE_PEAK_MZ, "base peak m/z", Some(&format!("{:.10}", scan.base_peak_mz)), None)?;
-    write_cv_param(writer, cv::BASE_PEAK_INTENSITY, "base peak intensity", Some(&format!("{:.4}", scan.base_peak_intensity)), None)?;
-    write_cv_param(writer, cv::TOTAL_ION_CURRENT, "total ion current", Some(&format!("{:.4}", scan.tic)), None)?;
+    write_cv_param(
+        writer,
+        cv::BASE_PEAK_MZ,
+        "base peak m/z",
+        Some(&format!("{:.10}", scan.base_peak_mz)),
+        None,
+    )?;
+    write_cv_param(
+        writer,
+        cv::BASE_PEAK_INTENSITY,
+        "base peak intensity",
+        Some(&format!("{:.4}", scan.base_peak_intensity)),
+        None,
+    )?;
+    write_cv_param(
+        writer,
+        cv::TOTAL_ION_CURRENT,
+        "total ion current",
+        Some(&format!("{:.4}", scan.tic)),
+        None,
+    )?;
 
     // m/z range
     if !scan.centroid_mz.is_empty() {
         let low = scan.centroid_mz.first().unwrap();
         let high = scan.centroid_mz.last().unwrap();
-        write_cv_param(writer, cv::LOWEST_MZ, "lowest observed m/z", Some(&format!("{:.10}", low)), None)?;
-        write_cv_param(writer, cv::HIGHEST_MZ, "highest observed m/z", Some(&format!("{:.10}", high)), None)?;
+        write_cv_param(
+            writer,
+            cv::LOWEST_MZ,
+            "lowest observed m/z",
+            Some(&format!("{:.10}", low)),
+            None,
+        )?;
+        write_cv_param(
+            writer,
+            cv::HIGHEST_MZ,
+            "highest observed m/z",
+            Some(&format!("{:.10}", high)),
+            None,
+        )?;
     }
 
     // <scanList>
@@ -647,12 +893,21 @@ fn write_empty_spectrum<W: Write>(
 
     write_cv_param(writer, cv::MS1_SPECTRUM, "MS1 spectrum", None, None)?;
     write_cv_param(writer, cv::MS_LEVEL, "ms level", Some("1"), None)?;
-    write_cv_param(writer, cv::CENTROID_SPECTRUM, "centroid spectrum", None, None)?;
+    write_cv_param(
+        writer,
+        cv::CENTROID_SPECTRUM,
+        "centroid spectrum",
+        None,
+        None,
+    )?;
 
     // userParam noting the error
     let mut up = BytesStart::new("userParam");
     up.push_attribute(("name", "decode error"));
-    up.push_attribute(("value", format!("Failed to decode scan {}", scan_num).as_str()));
+    up.push_attribute((
+        "value",
+        format!("Failed to decode scan {}", scan_num).as_str(),
+    ));
     writer.write_event(Event::Empty(up))?;
 
     // Empty binary data arrays
@@ -851,7 +1106,11 @@ fn write_empty_binary_array<W: Write>(
     write_cv_param(
         writer,
         precision_accession,
-        if precision_accession == cv::FLOAT_64 { "64-bit float" } else { "32-bit float" },
+        if precision_accession == cv::FLOAT_64 {
+            "64-bit float"
+        } else {
+            "32-bit float"
+        },
         None,
         None,
     )?;

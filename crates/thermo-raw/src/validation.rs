@@ -82,9 +82,8 @@ pub fn load_scan_index(truth_dir: &Path) -> Result<Vec<GroundTruthScanIndex>, Ra
     let data = std::fs::read_to_string(&path).map_err(|e| {
         RawError::CorruptedData(format!("Failed to read {}: {}", path.display(), e))
     })?;
-    serde_json::from_str(&data).map_err(|e| {
-        RawError::CorruptedData(format!("Failed to parse {}: {}", path.display(), e))
-    })
+    serde_json::from_str(&data)
+        .map_err(|e| RawError::CorruptedData(format!("Failed to parse {}: {}", path.display(), e)))
 }
 
 /// Load per-scan ground truth data.
@@ -95,9 +94,8 @@ pub fn load_scan_data(truth_dir: &Path, scan_number: u32) -> Result<GroundTruthS
     let data = std::fs::read_to_string(&path).map_err(|e| {
         RawError::CorruptedData(format!("Failed to read {}: {}", path.display(), e))
     })?;
-    serde_json::from_str(&data).map_err(|e| {
-        RawError::CorruptedData(format!("Failed to parse {}: {}", path.display(), e))
-    })
+    serde_json::from_str(&data)
+        .map_err(|e| RawError::CorruptedData(format!("Failed to parse {}: {}", path.display(), e)))
 }
 
 /// Compare two m/z arrays and return (max_error_ppm, mean_error_ppm, error_messages).
@@ -239,8 +237,11 @@ fn validate_single_scan(
 
         // Validate centroid intensity
         if let Some(ref truth_int) = truth_data.centroid_intensity {
-            let (max_int_err, int_errors) =
-                validate_intensity_arrays(&scan.centroid_intensity, truth_int, criteria.intensity_rel_tolerance);
+            let (max_int_err, int_errors) = validate_intensity_arrays(
+                &scan.centroid_intensity,
+                truth_int,
+                criteria.intensity_rel_tolerance,
+            );
             intensity_max_error = max_int_err;
             errors.extend(int_errors);
         }

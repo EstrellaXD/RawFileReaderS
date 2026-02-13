@@ -365,11 +365,7 @@ fn parse_reaction(reader: &mut BinaryReader, ver: u32) -> Result<Reaction, RawEr
     };
 
     // IsolationWidthOffset (v66+)
-    let isolation_width_offset = if ver >= 66 {
-        reader.read_f64()?
-    } else {
-        0.0
-    };
+    let isolation_width_offset = if ver >= 66 { reader.read_f64()? } else { 0.0 };
 
     // Ensure we advanced exactly rxn_size bytes (handles struct padding)
     let expected_end = start + rxn_size as u64;
@@ -396,11 +392,7 @@ fn parse_reaction(reader: &mut BinaryReader, ver: u32) -> Result<Reaction, RawEr
 ///   source_fragmentations → source_fragmentation_mass_ranges → name (v65+)
 ///
 /// Returns the parsed ScanEvent and the final reader position.
-pub fn parse_scan_event(
-    data: &[u8],
-    offset: u64,
-    ver: u32,
-) -> Result<(ScanEvent, u64), RawError> {
+pub fn parse_scan_event(data: &[u8], offset: u64, ver: u32) -> Result<(ScanEvent, u64), RawError> {
     let preamble_size = version::scan_event_preamble_size(ver);
     let mut reader = BinaryReader::at_offset(data, offset);
 

@@ -113,6 +113,12 @@ impl RawFileInfo {
         let mut blob_size = 0u32;
 
         if version >= 64 {
+            // .NET RawFileInfoStruct uses LayoutKind.Sequential with natural alignment.
+            // After OldVCI[64] (768 bytes starting at struct+36), the reader is at struct+804.
+            // VirtualDataOffset (long, 8-byte alignment) needs 4 bytes of padding to reach
+            // struct+808. NewVCI then starts at struct+816.
+            reader.skip(4)?; // alignment padding for i64
+
             // VirtualDataOffset (i64) - 64-bit version of VirtualDataOffset32
             let _data_addr_64 = reader.read_u64()?;
 
@@ -137,8 +143,12 @@ impl RawFileInfo {
             // Some files (e.g., 2018-era Exactive v66) have valid 32-bit offsets
             // but zeroed/garbage 64-bit VCI area.
             let file_size = data.len() as u64;
-            if !controllers.iter().any(|c| Self::is_valid_controller(c, file_size))
-                && old_controllers.iter().any(|c| Self::is_valid_controller(c, file_size))
+            if !controllers
+                .iter()
+                .any(|c| Self::is_valid_controller(c, file_size))
+                && old_controllers
+                    .iter()
+                    .any(|c| Self::is_valid_controller(c, file_size))
             {
                 controllers = old_controllers;
             }
@@ -189,7 +199,11 @@ impl RawFileInfo {
     /// MS-specific controller is found.
     pub fn run_header_addr(&self) -> u64 {
         // Prefer device_type=0 (MS controller per Thermo Device enum)
-        if let Some(ms) = self.controllers.iter().find(|c| c.device_type == 0 && c.offset > 0) {
+        if let Some(ms) = self
+            .controllers
+            .iter()
+            .find(|c| c.device_type == 0 && c.offset > 0)
+        {
             return ms.offset as u64;
         }
         // Fallback: first controller with non-zero offset
@@ -201,7 +215,11 @@ impl RawFileInfo {
     }
 
     /// Get controller info for a specific device type and index.
-    pub fn controller(&self, device_type: i32, device_index: i32) -> Option<&VirtualControllerInfo> {
+    pub fn controller(
+        &self,
+        device_type: i32,
+        device_index: i32,
+    ) -> Option<&VirtualControllerInfo> {
         self.controllers
             .iter()
             .find(|c| c.device_type == device_type && c.device_index == device_index)
@@ -218,6 +236,13 @@ impl RawFileInfo {
     /// and zero entries. If all 64 entries are either valid or empty (no garbage),
     /// and at least one is valid, the alignment is correct.
     pub fn has_valid_controllers(&self, file_size: u64) -> bool {
+        // Quick reject: n_controllers must be in a plausible range (0-16).
+        // This prevents false positives when scanning through garbage data.
+        // n_controllers=0 is allowed (zeroed preamble files with intact VCI arrays).
+        if self.n_controllers > 16 {
+            return false;
+        }
+
         // Pass 1: Strict validation (date + n_controllers + VCI)
         if self.has_valid_controllers_strict(file_size) {
             return true;
@@ -238,7 +263,11 @@ impl RawFileInfo {
         }
 
         if n == 0 {
-            return self.controllers.iter().take(16).all(Self::is_zero_controller);
+            return self
+                .controllers
+                .iter()
+                .take(16)
+                .all(Self::is_zero_controller);
         }
 
         let valid_count = self.controllers[..n]
@@ -246,7 +275,11 @@ impl RawFileInfo {
             .filter(|c| Self::is_valid_controller(c, file_size))
             .count();
 
-        valid_count == n && self.controllers[n..].iter().take(4).all(Self::is_zero_controller)
+        valid_count == n
+            && self.controllers[n..]
+                .iter()
+                .take(4)
+                .all(Self::is_zero_controller)
     }
 
     /// VCI-only validation: ignores date and n_controllers fields.
@@ -342,12 +375,12 @@ mod tests {
         // Valid date (2020-05-15) + 2 valid controllers
         let controllers = vec![
             VirtualControllerInfo {
-                device_type: 0,    // MS
+                device_type: 0, // MS
                 device_index: 0,
                 offset: 10000,
             },
             VirtualControllerInfo {
-                device_type: 1,    // MSAnalog
+                device_type: 1, // MSAnalog
                 device_index: 0,
                 offset: 20000,
             },
@@ -466,7 +499,7 @@ mod tests {
                 offset: 10000,
             },
             VirtualControllerInfo {
-                device_type: 99,   // Invalid device_type (must be 0-5)
+                device_type: 99, // Invalid device_type (must be 0-5)
                 device_index: 0,
                 offset: 10000,
             },
@@ -483,7 +516,7 @@ mod tests {
         // device_index must be 0-7
         let mut controllers = vec![VirtualControllerInfo {
             device_type: 0,
-            device_index: 10,  // Invalid (> 7)
+            device_index: 10, // Invalid (> 7)
             offset: 10000,
         }];
         controllers.resize(64, VirtualControllerInfo::default());
@@ -498,7 +531,7 @@ mod tests {
         let mut controllers = vec![VirtualControllerInfo {
             device_type: 0,
             device_index: 0,
-            offset: 4000,  // Too small
+            offset: 4000, // Too small
         }];
         controllers.resize(64, VirtualControllerInfo::default());
 
@@ -512,7 +545,7 @@ mod tests {
         let mut controllers = vec![VirtualControllerInfo {
             device_type: 0,
             device_index: 0,
-            offset: 200000,  // Beyond file size
+            offset: 200000, // Beyond file size
         }];
         controllers.resize(64, VirtualControllerInfo::default());
 
@@ -618,13 +651,11 @@ mod tests {
         // but we can test the validation logic that would apply.
 
         // Case 1: NewVCI has valid entries (normal case)
-        let new_controllers = vec![
-            VirtualControllerInfo {
-                device_type: 0,
-                device_index: 0,
-                offset: 10000,
-            },
-        ];
+        let new_controllers = vec![VirtualControllerInfo {
+            device_type: 0,
+            device_index: 0,
+            offset: 10000,
+        }];
         let mut full_new = new_controllers;
         full_new.resize(64, VirtualControllerInfo::default());
 
@@ -636,13 +667,11 @@ mod tests {
     fn test_fallback_old_vci_valid_new_vci_invalid() {
         // Simulate OldVCI having valid data when NewVCI doesn't.
         // This tests the logic that would be used in the fallback.
-        let old_controllers = vec![
-            VirtualControllerInfo {
-                device_type: 0,
-                device_index: 0,
-                offset: 10000,
-            },
-        ];
+        let old_controllers = vec![VirtualControllerInfo {
+            device_type: 0,
+            device_index: 0,
+            offset: 10000,
+        }];
         let mut full_old = old_controllers;
         full_old.resize(64, VirtualControllerInfo::default());
 
@@ -660,9 +689,7 @@ mod tests {
         // Here we verify the validation would work on the old controllers.
         let file_size = 100000i64;
         let is_valid_entry = |c: &VirtualControllerInfo| {
-            (0..=5).contains(&c.device_type)
-                && c.offset > 4096
-                && c.offset < file_size
+            (0..=5).contains(&c.device_type) && c.offset > 4096 && c.offset < file_size
         };
 
         assert!(full_old.iter().any(is_valid_entry));
@@ -674,17 +701,17 @@ mod tests {
     fn test_run_header_addr_finds_ms_controller() {
         let controllers = vec![
             VirtualControllerInfo {
-                device_type: 2,    // Analog (not MS)
+                device_type: 2, // Analog (not MS)
                 device_index: 0,
                 offset: 5000,
             },
             VirtualControllerInfo {
-                device_type: 0,    // MS
+                device_type: 0, // MS
                 device_index: 0,
                 offset: 10000,
             },
             VirtualControllerInfo {
-                device_type: 1,    // MSAnalog
+                device_type: 1, // MSAnalog
                 device_index: 0,
                 offset: 15000,
             },
@@ -703,15 +730,15 @@ mod tests {
             VirtualControllerInfo {
                 device_type: 0,
                 device_index: 0,
-                offset: 0,         // Zero offset
+                offset: 0, // Zero offset
             },
             VirtualControllerInfo {
-                device_type: 2,    // Analog
+                device_type: 2, // Analog
                 device_index: 0,
                 offset: 8000,
             },
             VirtualControllerInfo {
-                device_type: 3,    // UV
+                device_type: 3, // UV
                 device_index: 0,
                 offset: 12000,
             },

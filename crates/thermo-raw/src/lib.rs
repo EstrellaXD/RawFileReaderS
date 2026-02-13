@@ -26,6 +26,7 @@ pub mod error;
 pub mod file_header;
 pub mod io_utils;
 pub mod metadata;
+pub mod progress;
 pub mod raw_file;
 pub mod raw_file_info;
 pub mod run_header;
@@ -42,7 +43,8 @@ pub mod version;
 
 pub mod validation;
 
-pub use batch::{BatchXicResult, batch_xic_ms1};
+pub use batch::{batch_xic_ms1, batch_xic_ms1_with_progress, BatchXicResult};
 pub use error::RawError;
-pub use raw_file::{DebugInfo, DiagnosticReport, DiagnosticStage, RawFile, diagnose};
+pub use progress::{new_counter, ProgressCounter};
+pub use raw_file::{diagnose, DebugInfo, DiagnosticReport, DiagnosticStage, RawFile};
 pub use types::*;

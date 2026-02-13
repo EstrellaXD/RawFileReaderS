@@ -2,7 +2,68 @@ use numpy::{IntoPyArray, PyArray1, PyArray3, PyArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use ::thermo_raw::{MsLevel, RawFile as InnerRawFile};
+use ::thermo_raw::progress::{self, ProgressCounter};
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Try to create a tqdm progress bar, returning None if tqdm is not installed.
+fn try_create_tqdm(py: Python<'_>, total: u64, desc: &str) -> Option<PyObject> {
+    let tqdm = py
+        .import("tqdm.auto")
+        .or_else(|_| py.import("tqdm"))
+        .ok()?;
+    let bar = tqdm
+        .call_method1("tqdm", (total,))
+        .ok()?;
+    let _ = bar.setattr("desc", desc);
+    Some(bar.unbind())
+}
+
+/// Spawn a background thread that polls the atomic counter and updates tqdm.
+///
+/// Returns `(done_flag, join_handle)`. Set `done_flag` to true when the
+/// operation completes, then call `handle.join()`.
+fn spawn_tqdm_updater(
+    py: Python<'_>,
+    counter: &ProgressCounter,
+    bar: PyObject,
+) -> (Arc<AtomicBool>, std::thread::JoinHandle<()>) {
+    let done = Arc::new(AtomicBool::new(false));
+    let done_clone = Arc::clone(&done);
+    let counter_clone = Arc::clone(counter);
+    let bar_clone = bar.clone_ref(py);
+
+    let handle = std::thread::spawn(move || {
+        let mut last = 0u64;
+        while !done_clone.load(Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let current = counter_clone.load(Ordering::Relaxed);
+            if current > last {
+                let delta = current - last;
+                last = current;
+                Python::with_gil(|py| {
+                    let _ = bar_clone.call_method1(py, "update", (delta,));
+                });
+            }
+        }
+        // Final flush
+        let current = counter_clone.load(Ordering::Relaxed);
+        if current > last {
+            let delta = current - last;
+            Python::with_gil(|py| {
+                let _ = bar_clone.call_method1(py, "update", (delta,));
+                let _ = bar_clone.call_method0(py, "close");
+            });
+        } else {
+            Python::with_gil(|py| {
+                let _ = bar_clone.call_method0(py, "close");
+            });
+        }
+    });
+
+    (done, handle)
+}
 
 #[pyclass]
 struct RawFile {
@@ -119,36 +180,60 @@ impl RawFile {
     }
 
     /// XIC (all scans): return (rt_array, intensity_array) as numpy arrays.
-    #[pyo3(signature = (mz, ppm=None))]
+    #[pyo3(signature = (mz, ppm=None, progress=false))]
     fn xic<'py>(
         &self,
         py: Python<'py>,
         mz: f64,
         ppm: Option<f64>,
+        progress: bool,
     ) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
         let ppm = ppm.unwrap_or(5.0);
-        let chrom = self
-            .inner
-            .xic(mz, ppm)
-            .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
+        let chrom = if progress {
+            let total = self.inner.n_scans() as u64;
+            let counter = ::thermo_raw::new_counter();
+            let bar = try_create_tqdm(py, total, "XIC");
+            let updater = bar.map(|b| spawn_tqdm_updater(py, &counter, b));
+            let result = py.allow_threads(|| self.inner.xic_with_progress(mz, ppm, &counter));
+            if let Some((done, handle)) = updater {
+                done.store(true, Ordering::Relaxed);
+                handle.join().unwrap();
+            }
+            result
+        } else {
+            self.inner.xic(mz, ppm)
+        }
+        .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
         let rt = chrom.rt.into_pyarray(py);
         let intensity = chrom.intensity.into_pyarray(py);
         Ok((rt, intensity))
     }
 
     /// XIC restricted to MS1 scans only. Much faster for DDA data.
-    #[pyo3(signature = (mz, ppm=None))]
+    #[pyo3(signature = (mz, ppm=None, progress=false))]
     fn xic_ms1<'py>(
         &self,
         py: Python<'py>,
         mz: f64,
         ppm: Option<f64>,
+        progress: bool,
     ) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
         let ppm = ppm.unwrap_or(5.0);
-        let chrom = self
-            .inner
-            .xic_ms1(mz, ppm)
-            .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
+        let chrom = if progress {
+            let total = self.inner.n_scans() as u64;
+            let counter = ::thermo_raw::new_counter();
+            let bar = try_create_tqdm(py, total, "XIC MS1");
+            let updater = bar.map(|b| spawn_tqdm_updater(py, &counter, b));
+            let result = py.allow_threads(|| self.inner.xic_ms1_with_progress(mz, ppm, &counter));
+            if let Some((done, handle)) = updater {
+                done.store(true, Ordering::Relaxed);
+                handle.join().unwrap();
+            }
+            result
+        } else {
+            self.inner.xic_ms1(mz, ppm)
+        }
+        .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
         let rt = chrom.rt.into_pyarray(py);
         let intensity = chrom.intensity.into_pyarray(py);
         Ok((rt, intensity))
@@ -158,18 +243,34 @@ impl RawFile {
     ///
     /// Args:
     ///     targets: list of (mz, ppm) tuples
+    ///     progress: show tqdm progress bar (default: False)
     ///
     /// Returns:
     ///     list of (rt_array, intensity_array) tuples, one per target
+    #[pyo3(signature = (targets, progress=false))]
     fn xic_batch_ms1<'py>(
         &self,
         py: Python<'py>,
         targets: Vec<(f64, f64)>,
+        progress: bool,
     ) -> PyResult<Vec<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)>> {
-        let chroms = self
-            .inner
-            .xic_batch_ms1(&targets)
-            .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
+        let chroms = if progress {
+            let total = self.inner.n_scans() as u64;
+            let counter = ::thermo_raw::new_counter();
+            let bar = try_create_tqdm(py, total, "Batch XIC MS1");
+            let updater = bar.map(|b| spawn_tqdm_updater(py, &counter, b));
+            let result = py.allow_threads(|| {
+                self.inner.xic_batch_ms1_with_progress(&targets, &counter)
+            });
+            if let Some((done, handle)) = updater {
+                done.store(true, Ordering::Relaxed);
+                handle.join().unwrap();
+            }
+            result
+        } else {
+            self.inner.xic_batch_ms1(&targets)
+        }
+        .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
         let results = chroms
             .into_iter()
             .map(|c| {
@@ -182,16 +283,32 @@ impl RawFile {
     }
 
     /// Read all MS1 scans in parallel, return list of (mz, intensity) tuples.
+    #[pyo3(signature = (progress=false))]
     fn all_ms1_scans<'py>(
         &self,
         py: Python<'py>,
+        progress: bool,
     ) -> PyResult<Vec<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)>> {
         let first = self.inner.first_scan();
         let last = self.inner.last_scan();
-        let scans = self
-            .inner
-            .scans_parallel(first..last + 1)
-            .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
+        let scans = if progress {
+            let total = self.inner.n_scans() as u64;
+            let counter = ::thermo_raw::new_counter();
+            let bar = try_create_tqdm(py, total, "Reading scans");
+            let updater = bar.map(|b| spawn_tqdm_updater(py, &counter, b));
+            let result = py.allow_threads(|| {
+                self.inner
+                    .scans_parallel_with_progress(first..last + 1, &counter)
+            });
+            if let Some((done, handle)) = updater {
+                done.store(true, Ordering::Relaxed);
+                handle.join().unwrap();
+            }
+            result
+        } else {
+            self.inner.scans_parallel(first..last + 1)
+        }
+        .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
         let results: Vec<_> = scans
             .into_iter()
             .filter(|s| matches!(s.ms_level, MsLevel::Ms1))
@@ -253,6 +370,7 @@ struct ScanInfo {
 ///     targets: list of (mz, ppm) tuples
 ///     rt_range: optional (start, end) in minutes
 ///     rt_resolution: grid spacing in minutes (default: 0.01)
+///     progress: show tqdm progress bar (default: False)
 ///
 /// Returns:
 ///     (tensor, rt_grid, sample_names) where:
@@ -260,13 +378,14 @@ struct ScanInfo {
 ///         rt_grid: numpy array of RT values
 ///         sample_names: list of file stem strings
 #[pyfunction]
-#[pyo3(signature = (file_paths, targets, rt_range=None, rt_resolution=0.01))]
+#[pyo3(signature = (file_paths, targets, rt_range=None, rt_resolution=0.01, progress=false))]
 fn batch_xic<'py>(
     py: Python<'py>,
     file_paths: Vec<String>,
     targets: Vec<(f64, f64)>,
     rt_range: Option<(f64, f64)>,
     rt_resolution: f64,
+    progress: bool,
 ) -> PyResult<(
     Bound<'py, PyArray3<f64>>,
     Bound<'py, PyArray1<f64>>,
@@ -274,8 +393,29 @@ fn batch_xic<'py>(
 )> {
     let paths: Vec<&Path> = file_paths.iter().map(|s| Path::new(s.as_str())).collect();
 
-    let result = ::thermo_raw::batch_xic_ms1(&paths, &targets, rt_range, rt_resolution)
-        .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
+    let result = if progress {
+        let total = file_paths.len() as u64;
+        let counter = ::thermo_raw::new_counter();
+        let bar = try_create_tqdm(py, total, "Batch XIC");
+        let updater = bar.map(|b| spawn_tqdm_updater(py, &counter, b));
+        let r = py.allow_threads(|| {
+            ::thermo_raw::batch_xic_ms1_with_progress(
+                &paths,
+                &targets,
+                rt_range,
+                rt_resolution,
+                &counter,
+            )
+        });
+        if let Some((done, handle)) = updater {
+            done.store(true, Ordering::Relaxed);
+            handle.join().unwrap();
+        }
+        r
+    } else {
+        ::thermo_raw::batch_xic_ms1(&paths, &targets, rt_range, rt_resolution)
+    }
+    .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
 
     // Build 3D numpy array (samples x targets x timepoints) from flat data
     let flat = result.data.into_pyarray(py);

@@ -3,7 +3,10 @@ use std::fs;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "hex-analyzer", about = "Thermo RAW file reverse engineering helper")]
+#[command(
+    name = "hex-analyzer",
+    about = "Thermo RAW file reverse engineering helper"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -198,7 +201,9 @@ fn detect_stride(data: &[u8], values: &[f64], tolerance: f64) -> Vec<(usize, usi
                     break;
                 }
                 let found = f64::from_le_bytes(
-                    data[expected_offset..expected_offset + 8].try_into().unwrap(),
+                    data[expected_offset..expected_offset + 8]
+                        .try_into()
+                        .unwrap(),
                 );
                 if (found - val).abs() > tolerance.max(val.abs() * tolerance) {
                     all_match = false;
@@ -391,10 +396,7 @@ fn main() {
                 .take(10)
                 .filter_map(|s| s["rt"].as_f64())
                 .collect();
-            println!(
-                "=== Auto-locating fields in {} ===",
-                raw_file.display()
-            );
+            println!("=== Auto-locating fields in {} ===", raw_file.display());
             println!(
                 "Using first {} RT values: {:?}",
                 rts.len(),

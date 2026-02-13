@@ -1,5 +1,8 @@
 use clap::{Parser, Subcommand};
+use indicatif::{ProgressBar, ProgressStyle};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use thermo_raw::RawFile;
 
 #[derive(Parser)]
@@ -144,6 +147,44 @@ fn polarity_str(p: &thermo_raw::Polarity) -> &'static str {
         thermo_raw::Polarity::Negative => "Negative",
         thermo_raw::Polarity::Unknown => "Unknown",
     }
+}
+
+/// Spawn a progress bar backed by an atomic counter.
+///
+/// Returns `(counter, done_flag)`. The caller increments `counter` from worker
+/// threads; a background thread polls it every 50ms to update the bar. Set
+/// `done_flag` to `true` and join the returned handle to finish cleanly.
+fn spawn_progress_bar(
+    total: u64,
+    msg: &str,
+) -> (
+    thermo_raw::ProgressCounter,
+    Arc<AtomicBool>,
+    std::thread::JoinHandle<()>,
+) {
+    let counter = thermo_raw::new_counter();
+    let done = Arc::new(AtomicBool::new(false));
+
+    let bar = ProgressBar::new(total);
+    bar.set_style(
+        ProgressStyle::with_template("{msg} [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+            .unwrap()
+            .progress_chars("=> "),
+    );
+    bar.set_message(msg.to_string());
+
+    let counter_clone = Arc::clone(&counter);
+    let done_clone = Arc::clone(&done);
+    let handle = std::thread::spawn(move || {
+        while !done_clone.load(Ordering::Relaxed) {
+            bar.set_position(counter_clone.load(Ordering::Relaxed));
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        bar.set_position(counter_clone.load(Ordering::Relaxed));
+        bar.finish();
+    });
+
+    (counter, done, handle)
 }
 
 fn main() -> anyhow::Result<()> {
@@ -319,23 +360,14 @@ fn main() -> anyhow::Result<()> {
 
             println!("Validation Report");
             println!("=================");
-            println!(
-                "Total scans:  {}",
-                report.total_scans
-            );
+            println!("Total scans:  {}", report.total_scans);
             println!(
                 "Passed:       {} ({:.1}%)",
                 report.passed_scans,
                 report.pass_rate * 100.0
             );
-            println!(
-                "Failed:       {}",
-                report.failed_scans
-            );
-            println!(
-                "Worst m/z error: {:.4} ppm",
-                report.worst_mz_error_ppm
-            );
+            println!("Failed:       {}", report.failed_scans);
+            println!("Worst m/z error: {:.4} ppm", report.worst_mz_error_ppm);
             println!(
                 "Worst intensity error: {:.2e}",
                 report.worst_intensity_error
@@ -363,7 +395,11 @@ fn main() -> anyhow::Result<()> {
             let info = raw.debug_info();
 
             println!("=== Debug Info: {} ===", file.display());
-            println!("File size:       {} bytes ({:.1} MB)", info.file_size, info.file_size as f64 / 1e6);
+            println!(
+                "File size:       {} bytes ({:.1} MB)",
+                info.file_size,
+                info.file_size as f64 / 1e6
+            );
             println!("Version:         {}", info.version);
             println!("RunHeader start: {}", info.run_header_start);
             println!();
@@ -378,32 +414,65 @@ fn main() -> anyhow::Result<()> {
             if let Some(addr) = info.scan_index_addr_64 {
                 println!("--- 64-bit addresses ---");
                 println!("  ScanIndex:     {} (SpectPos)", addr);
-                println!("  DataStream:    {} (PacketPos)", info.data_addr_64.unwrap_or(0));
-                println!("  TrailerExtra:  {} (TrailerScanEventsPos)", info.scan_trailer_addr_64.unwrap_or(0));
-                println!("  ScanParams:    {} (TrailerExtraPos)", info.scan_params_addr_64.unwrap_or(0));
+                println!(
+                    "  DataStream:    {} (PacketPos)",
+                    info.data_addr_64.unwrap_or(0)
+                );
+                println!(
+                    "  TrailerExtra:  {} (TrailerScanEventsPos)",
+                    info.scan_trailer_addr_64.unwrap_or(0)
+                );
+                println!(
+                    "  ScanParams:    {} (TrailerExtraPos)",
+                    info.scan_params_addr_64.unwrap_or(0)
+                );
 
                 // Validate: all addresses should be < file_size
-                let addrs = [addr, info.data_addr_64.unwrap_or(0),
-                             info.scan_trailer_addr_64.unwrap_or(0),
-                             info.scan_params_addr_64.unwrap_or(0)];
+                let addrs = [
+                    addr,
+                    info.data_addr_64.unwrap_or(0),
+                    info.scan_trailer_addr_64.unwrap_or(0),
+                    info.scan_params_addr_64.unwrap_or(0),
+                ];
                 let all_valid = addrs.iter().all(|&a| a > 0 && a < info.file_size);
-                println!("  All valid:     {}", if all_valid { "YES" } else { "NO -- addresses exceed file size!" });
+                println!(
+                    "  All valid:     {}",
+                    if all_valid {
+                        "YES"
+                    } else {
+                        "NO -- addresses exceed file size!"
+                    }
+                );
                 println!();
             }
 
-            println!("Effective data_addr: {} (used for scan offset computation)", info.effective_data_addr);
+            println!(
+                "Effective data_addr: {} (used for scan offset computation)",
+                info.effective_data_addr
+            );
             println!("Instrument type: {}", info.instrument_type);
-            println!("Scans: {}, Scan events: {}", info.n_scans, info.n_scan_events);
+            println!(
+                "Scans: {}, Scan events: {}",
+                info.n_scans, info.n_scan_events
+            );
             println!();
 
             println!("--- First scan index entries ---");
             for (i, e) in info.first_scan_entries.iter().enumerate() {
-                println!("  [{}] offset={}, data_size={}, rt={:.4}, tic={:.2e}, packet_type=0x{:08X}",
-                    i, e.offset, e.data_size, e.rt, e.tic, e.packet_type);
+                println!(
+                    "  [{}] offset={}, data_size={}, rt={:.4}, tic={:.2e}, packet_type=0x{:08X}",
+                    i, e.offset, e.data_size, e.rt, e.tic, e.packet_type
+                );
                 let abs_offset = info.effective_data_addr + e.offset;
-                println!("       abs_offset={} (within file: {})",
+                println!(
+                    "       abs_offset={} (within file: {})",
                     abs_offset,
-                    if abs_offset < info.file_size { "YES" } else { "NO" });
+                    if abs_offset < info.file_size {
+                        "YES"
+                    } else {
+                        "NO"
+                    }
+                );
             }
 
             // Try reading scan 1
@@ -411,12 +480,18 @@ fn main() -> anyhow::Result<()> {
             let first = raw.first_scan();
             match raw.scan(first) {
                 Ok(scan) => {
-                    println!("Scan {} decoded OK: {} centroids, tic={:.2e}",
-                        first, scan.centroid_mz.len(), scan.tic);
+                    println!(
+                        "Scan {} decoded OK: {} centroids, tic={:.2e}",
+                        first,
+                        scan.centroid_mz.len(),
+                        scan.tic
+                    );
                     if !scan.centroid_mz.is_empty() {
-                        println!("  First m/z: {:.6}, last m/z: {:.6}",
+                        println!(
+                            "  First m/z: {:.6}, last m/z: {:.6}",
                             scan.centroid_mz[0],
-                            scan.centroid_mz[scan.centroid_mz.len() - 1]);
+                            scan.centroid_mz[scan.centroid_mz.len() - 1]
+                        );
                     }
                 }
                 Err(e) => {
@@ -445,8 +520,18 @@ fn main() -> anyhow::Result<()> {
                 }
             });
 
+            let n_files = files.len() as u64;
+            let (counter, done, handle) = spawn_progress_bar(n_files, "Batch XIC");
             let start = std::time::Instant::now();
-            let result = thermo_raw::batch_xic_ms1(&paths, &targets, rt_range_parsed, rt_resolution)?;
+            let result = thermo_raw::batch_xic_ms1_with_progress(
+                &paths,
+                &targets,
+                rt_range_parsed,
+                rt_resolution,
+                &counter,
+            )?;
+            done.store(true, Ordering::Relaxed);
+            handle.join().unwrap();
             let elapsed = start.elapsed();
 
             eprintln!(
@@ -514,8 +599,21 @@ fn main() -> anyhow::Result<()> {
 
             if input.is_dir() {
                 let out_dir = output.unwrap_or_else(|| input.clone());
+                let file_count = std::fs::read_dir(&input)?
+                    .filter_map(|e| e.ok())
+                    .filter(|e| {
+                        e.path()
+                            .extension()
+                            .is_some_and(|ext| ext.eq_ignore_ascii_case("raw"))
+                    })
+                    .count() as u64;
+                let (counter, done, handle) = spawn_progress_bar(file_count, "Converting folder");
                 let start = std::time::Instant::now();
-                let files = thermo_raw_mzml::convert_folder(&input, &out_dir, &config)?;
+                let files = thermo_raw_mzml::convert_folder_with_progress(
+                    &input, &out_dir, &config, &counter,
+                )?;
+                done.store(true, Ordering::Relaxed);
+                handle.join().unwrap();
                 let elapsed = start.elapsed();
                 println!(
                     "Converted {} files in {:.1}s",
@@ -526,9 +624,17 @@ fn main() -> anyhow::Result<()> {
                     println!("  {}", f.display());
                 }
             } else {
+                // Get scan count for progress bar
+                let raw_for_count = RawFile::open_mmap(&input)?;
+                let n_scans = raw_for_count.n_scans() as u64;
+                drop(raw_for_count);
+
+                let (counter, done, handle) = spawn_progress_bar(n_scans, "Converting");
                 let out_path = output.unwrap_or_else(|| input.with_extension("mzML"));
                 let start = std::time::Instant::now();
-                thermo_raw_mzml::convert_file(&input, &out_path, &config)?;
+                thermo_raw_mzml::convert_file_with_progress(&input, &out_path, &config, &counter)?;
+                done.store(true, Ordering::Relaxed);
+                handle.join().unwrap();
                 let elapsed = start.elapsed();
                 println!(
                     "Converted {} -> {} in {:.1}s",
@@ -560,29 +666,43 @@ fn main() -> anyhow::Result<()> {
 
             if xic {
                 // XIC benchmark: internally timed to exclude process startup
-                let targets = [524.2648, 445.12, 300.15, 600.33, 750.42,
-                               200.10, 888.55, 1100.78, 350.22, 500.00];
+                let targets = [
+                    524.2648, 445.12, 300.15, 600.33, 750.42, 200.10, 888.55, 1100.78, 350.22,
+                    500.00,
+                ];
                 let ppm = 5.0;
 
                 // Single target XIC
                 let start = std::time::Instant::now();
                 let chrom = raw.xic_ms1(targets[0], ppm)?;
                 let elapsed = start.elapsed();
-                println!("XIC MS1 single: {:.1}ms ({} points)", elapsed.as_secs_f64() * 1000.0, chrom.rt.len());
+                println!(
+                    "XIC MS1 single: {:.1}ms ({} points)",
+                    elapsed.as_secs_f64() * 1000.0,
+                    chrom.rt.len()
+                );
 
                 // 3-target batch XIC
                 let batch3: Vec<(f64, f64)> = targets[..3].iter().map(|&mz| (mz, ppm)).collect();
                 let start = std::time::Instant::now();
                 let chroms = raw.xic_batch_ms1(&batch3)?;
                 let elapsed = start.elapsed();
-                println!("XIC MS1 batch 3: {:.1}ms ({} chroms)", elapsed.as_secs_f64() * 1000.0, chroms.len());
+                println!(
+                    "XIC MS1 batch 3: {:.1}ms ({} chroms)",
+                    elapsed.as_secs_f64() * 1000.0,
+                    chroms.len()
+                );
 
                 // 10-target batch XIC
                 let batch10: Vec<(f64, f64)> = targets.iter().map(|&mz| (mz, ppm)).collect();
                 let start = std::time::Instant::now();
                 let chroms = raw.xic_batch_ms1(&batch10)?;
                 let elapsed = start.elapsed();
-                println!("XIC MS1 batch 10: {:.1}ms ({} chroms)", elapsed.as_secs_f64() * 1000.0, chroms.len());
+                println!(
+                    "XIC MS1 batch 10: {:.1}ms ({} chroms)",
+                    elapsed.as_secs_f64() * 1000.0,
+                    chroms.len()
+                );
             } else {
                 let start = std::time::Instant::now();
                 if parallel {

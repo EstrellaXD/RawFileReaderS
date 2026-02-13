@@ -3,9 +3,10 @@
 //! Produces a tensor (samples x targets x timepoints) aligned to a common RT grid.
 //! Used for cross-sample analysis in proteomics/metabolomics experiments.
 
+use crate::progress::{self, ProgressCounter};
+use crate::raw_file::RawFile;
 use crate::types::Chromatogram;
 use crate::RawError;
-use crate::raw_file::RawFile;
 use rayon::prelude::*;
 use std::path::Path;
 
@@ -117,7 +118,108 @@ pub fn batch_xic_ms1(
         let chroms: &Vec<Chromatogram> = chroms;
         for (t, chrom) in chroms.iter().enumerate() {
             let offset = (s * n_targets + t) * n_timepoints;
-            interpolate_onto_grid(&chrom.rt, &chrom.intensity, &rt_grid, &mut data[offset..offset + n_timepoints]);
+            interpolate_onto_grid(
+                &chrom.rt,
+                &chrom.intensity,
+                &rt_grid,
+                &mut data[offset..offset + n_timepoints],
+            );
+        }
+    }
+
+    let sample_names = per_file.into_iter().map(|(name, _)| name).collect();
+
+    Ok(BatchXicResult {
+        rt_grid,
+        data,
+        sample_names,
+        n_samples,
+        n_targets,
+        n_timepoints,
+    })
+}
+
+/// Like [`batch_xic_ms1`], but increments the progress counter after each file.
+pub fn batch_xic_ms1_with_progress(
+    paths: &[&Path],
+    targets: &[(f64, f64)],
+    rt_range: Option<(f64, f64)>,
+    rt_resolution: f64,
+    counter: &ProgressCounter,
+) -> Result<BatchXicResult, RawError> {
+    if paths.is_empty() {
+        return Err(RawError::CorruptedData("No files provided".to_string()));
+    }
+    if targets.is_empty() {
+        return Err(RawError::CorruptedData("No targets provided".to_string()));
+    }
+
+    type FileResult = Result<(String, Vec<Chromatogram>), (String, RawError)>;
+
+    let results: Vec<FileResult> = paths
+        .par_iter()
+        .map(|path| {
+            let name = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let result = match RawFile::open_mmap(path) {
+                Ok(raw) => match raw.xic_batch_ms1(targets) {
+                    Ok(chroms) => Ok((name, chroms)),
+                    Err(e) => Err((name, e)),
+                },
+                Err(e) => Err((name, e)),
+            };
+            progress::tick(counter);
+            result
+        })
+        .collect();
+
+    let mut per_file = Vec::new();
+    let mut skipped = Vec::new();
+    for r in results {
+        match r {
+            Ok(item) => per_file.push(item),
+            Err((name, err)) => skipped.push((name, err)),
+        }
+    }
+
+    for (name, err) in &skipped {
+        eprintln!("Warning: skipping '{}': {}", name, err);
+    }
+
+    if per_file.is_empty() {
+        return Err(RawError::CorruptedData(
+            "All files failed to open".to_string(),
+        ));
+    }
+
+    let n_samples = per_file.len();
+    let n_targets = targets.len();
+
+    let (grid_start, grid_end) = compute_rt_bounds(&per_file, rt_range);
+
+    if grid_start >= grid_end {
+        return Err(RawError::CorruptedData(
+            "No overlapping RT range across files".to_string(),
+        ));
+    }
+
+    let rt_grid = build_rt_grid(grid_start, grid_end, rt_resolution);
+    let n_timepoints = rt_grid.len();
+
+    let mut data = vec![0.0f64; n_samples * n_targets * n_timepoints];
+
+    for (s, (_name, chroms)) in per_file.iter().enumerate() {
+        let chroms: &Vec<Chromatogram> = chroms;
+        for (t, chrom) in chroms.iter().enumerate() {
+            let offset = (s * n_targets + t) * n_timepoints;
+            interpolate_onto_grid(
+                &chrom.rt,
+                &chrom.intensity,
+                &rt_grid,
+                &mut data[offset..offset + n_timepoints],
+            );
         }
     }
 
@@ -183,12 +285,7 @@ fn build_rt_grid(start: f64, end: f64, resolution: f64) -> Vec<f64> {
 /// Uses a sliding index to avoid O(n*m) binary searches — since both
 /// the source RTs and grid are sorted, we walk forward through both.
 /// Points outside the source RT range get 0.0 (no extrapolation).
-fn interpolate_onto_grid(
-    rt_src: &[f64],
-    int_src: &[f64],
-    grid: &[f64],
-    out: &mut [f64],
-) {
+fn interpolate_onto_grid(rt_src: &[f64], int_src: &[f64], grid: &[f64], out: &mut [f64]) {
     if rt_src.is_empty() || int_src.is_empty() {
         for v in out.iter_mut() {
             *v = 0.0;
@@ -289,12 +386,9 @@ mod tests {
             rt_grid: vec![1.0, 2.0, 3.0],
             data: vec![
                 // sample 0, target 0
-                1.0, 2.0, 3.0,
-                // sample 0, target 1
-                4.0, 5.0, 6.0,
-                // sample 1, target 0
-                7.0, 8.0, 9.0,
-                // sample 1, target 1
+                1.0, 2.0, 3.0, // sample 0, target 1
+                4.0, 5.0, 6.0, // sample 1, target 0
+                7.0, 8.0, 9.0, // sample 1, target 1
                 10.0, 11.0, 12.0,
             ],
             sample_names: vec!["s0".to_string(), "s1".to_string()],

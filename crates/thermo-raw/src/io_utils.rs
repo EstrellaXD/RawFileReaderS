@@ -77,7 +77,11 @@ impl<'a> BinaryReader<'a> {
         if remaining < needed {
             return Err(RawError::CorruptedData(format!(
                 "{}: need {} bytes at offset {}, but only {} remaining (file size: {})",
-                op, needed, self.cursor.position(), remaining, self.cursor.get_ref().len()
+                op,
+                needed,
+                self.cursor.position(),
+                remaining,
+                self.cursor.get_ref().len()
             )));
         }
         Ok(())

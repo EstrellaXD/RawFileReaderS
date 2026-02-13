@@ -110,13 +110,13 @@ impl RunHeader {
             let addr_block_start = find_address_block(data, search_from, offset)?;
             reader.set_position(addr_block_start);
 
-            scan_index_addr_64 = Some(reader.read_u64()?);   // SpectPos
-            data_addr_64 = Some(reader.read_u64()?);          // PacketPos
-            let _inst_log_addr_64 = reader.read_u64()?;       // StatusLogPos
-            let _error_log_addr_64 = reader.read_u64()?;      // ErrorLogPos
-            let _run_header_addr_64 = reader.read_u64()?;     // RunHeaderPos (== offset)
-            scan_trailer_addr_64 = Some(reader.read_u64()?);  // TrailerScanEventsPos
-            scan_params_addr_64 = Some(reader.read_u64()?);   // TrailerExtraPos
+            scan_index_addr_64 = Some(reader.read_u64()?); // SpectPos
+            data_addr_64 = Some(reader.read_u64()?); // PacketPos
+            let _inst_log_addr_64 = reader.read_u64()?; // StatusLogPos
+            let _error_log_addr_64 = reader.read_u64()?; // ErrorLogPos
+            let _run_header_addr_64 = reader.read_u64()?; // RunHeaderPos (== offset)
+            scan_trailer_addr_64 = Some(reader.read_u64()?); // TrailerScanEventsPos
+            scan_params_addr_64 = Some(reader.read_u64()?); // TrailerExtraPos
 
             // VirtualControllerInfoStruct: VirtualDeviceType(4) + VirtualDeviceIndex(4) + Offset(8) = 16
             reader.skip(16)?;
@@ -131,8 +131,8 @@ impl RunHeader {
             reader.skip(56)?; // unknown_area after SampleInfo
 
             // Sample info tags (fixed-size UTF-16)
-            sample_tag1 = reader.read_utf16_fixed(88)?;  // 44 chars
-            sample_tag2 = reader.read_utf16_fixed(40)?;  // 20 chars
+            sample_tag1 = reader.read_utf16_fixed(88)?; // 44 chars
+            sample_tag2 = reader.read_utf16_fixed(40)?; // 20 chars
             sample_tag3 = reader.read_utf16_fixed(320)?; // 160 chars
 
             // 13 filename strings (each 260 UTF-16 chars = 520 bytes)
@@ -246,7 +246,11 @@ impl RunHeader {
 /// 1. RunHeaderPos at block+32 (5th i64) -- when RunHeaderPos is populated
 /// 2. VCI.Offset at block+64 (8 bytes into the 16-byte VCI after the 56-byte block)
 ///    -- handles files where RunHeaderPos=0
-fn find_address_block(data: &[u8], search_from: u64, run_header_offset: u64) -> Result<u64, RawError> {
+fn find_address_block(
+    data: &[u8],
+    search_from: u64,
+    run_header_offset: u64,
+) -> Result<u64, RawError> {
     let target_bytes = run_header_offset.to_le_bytes();
     let file_size = data.len() as u64;
 
@@ -281,13 +285,11 @@ fn find_address_block(data: &[u8], search_from: u64, run_header_offset: u64) -> 
         pos += 4;
     }
 
-    Err(RawError::CorruptedData(
-        format!(
-            "RunHeader: could not locate 64-bit address block \
+    Err(RawError::CorruptedData(format!(
+        "RunHeader: could not locate 64-bit address block \
              (RunHeaderPos={} not found in search range {}..{})",
-            run_header_offset, search_start, search_end
-        ),
-    ))
+        run_header_offset, search_start, search_end
+    )))
 }
 
 /// Validate that the first two i64s in a candidate address block are valid file offsets.

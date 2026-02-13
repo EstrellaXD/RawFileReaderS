@@ -162,8 +162,7 @@ mod tests {
 
     #[test]
     fn test_parse_ms2() {
-        let filter =
-            parse_filter("FTMS + c NSI d Full ms2 524.2648@hcd28.00 [100.0000-1060.0000]");
+        let filter = parse_filter("FTMS + c NSI d Full ms2 524.2648@hcd28.00 [100.0000-1060.0000]");
         assert!(matches!(filter.ms_level, MsLevel::Ms2));
         assert_eq!(filter.mass_range, Some((100.0, 1060.0)));
         let precursor = filter.precursor.as_ref().unwrap();
@@ -184,9 +183,8 @@ mod tests {
 
     #[test]
     fn test_parse_ms3() {
-        let filter = parse_filter(
-            "ITMS + c NSI d Full ms3 524.26@hcd28.00 300.15@hcd35.00 [100.00-600.00]",
-        );
+        let filter =
+            parse_filter("ITMS + c NSI d Full ms3 524.26@hcd28.00 300.15@hcd35.00 [100.00-600.00]");
         assert!(matches!(filter.ms_level, MsLevel::Ms3));
         // rfind('@') gets the last precursor (300.15), which is the direct MS3 precursor
         let precursor = filter.precursor.as_ref().unwrap();

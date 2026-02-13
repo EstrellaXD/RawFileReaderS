@@ -57,7 +57,7 @@ mod tests {
             .decode(&encoded)
             .unwrap();
         assert_eq!(decoded.len(), 24); // 3 * 8 bytes
-        // Verify round-trip
+                                       // Verify round-trip
         let val = f64::from_le_bytes(decoded[0..8].try_into().unwrap());
         assert!((val - 100.0).abs() < f64::EPSILON);
     }

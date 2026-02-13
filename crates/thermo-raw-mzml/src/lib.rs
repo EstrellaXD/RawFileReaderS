@@ -87,6 +87,23 @@ pub fn convert_file(
     Ok(())
 }
 
+/// Convert a single RAW file to mzML, ticking the counter after each scan.
+pub fn convert_file_with_progress(
+    raw_path: &Path,
+    output_path: &Path,
+    config: &MzmlConfig,
+    counter: &thermo_raw::ProgressCounter,
+) -> Result<(), MzmlError> {
+    let raw = thermo_raw::RawFile::open_mmap(raw_path)?;
+    let output = std::io::BufWriter::new(std::fs::File::create(output_path)?);
+    let source_name = raw_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    writer::write_mzml_with_progress(&raw, output, config, &source_name, counter)?;
+    Ok(())
+}
+
 /// Convert all RAW files in a folder to mzML (parallel).
 pub fn convert_folder(
     input_dir: &Path,
@@ -113,6 +130,41 @@ pub fn convert_folder(
             let stem = raw_path.file_stem().unwrap_or_default();
             let out_path = output_dir.join(format!("{}.mzML", stem.to_string_lossy()));
             convert_file(&raw_path, &out_path, config)?;
+            Ok(out_path)
+        })
+        .collect();
+
+    results.into_iter().collect()
+}
+
+/// Convert all RAW files in a folder to mzML (parallel), ticking per file.
+pub fn convert_folder_with_progress(
+    input_dir: &Path,
+    output_dir: &Path,
+    config: &MzmlConfig,
+    counter: &thermo_raw::ProgressCounter,
+) -> Result<Vec<PathBuf>, MzmlError> {
+    use rayon::prelude::*;
+
+    std::fs::create_dir_all(output_dir)?;
+
+    let entries: Vec<_> = std::fs::read_dir(input_dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path()
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("raw"))
+        })
+        .collect();
+
+    let results: Vec<Result<PathBuf, MzmlError>> = entries
+        .par_iter()
+        .map(|entry| {
+            let raw_path = entry.path();
+            let stem = raw_path.file_stem().unwrap_or_default();
+            let out_path = output_dir.join(format!("{}.mzML", stem.to_string_lossy()));
+            convert_file(&raw_path, &out_path, config)?;
+            thermo_raw::progress::tick(counter);
             Ok(out_path)
         })
         .collect();

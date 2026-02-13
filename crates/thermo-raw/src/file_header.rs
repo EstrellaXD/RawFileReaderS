@@ -1,15 +1,21 @@
 //! FileHeader parsing -- the first structure in the Finnigan data stream.
 //!
-//! Layout (FORMAT_SPEC.md Section 3):
-//! - 2 bytes: magic (0xA101)
-//! - 18 bytes: signature (UTF-16LE, 9 chars: "Finnigan\0")
-//! - 16 bytes: 4 unknown u32
-//! - 4 bytes: version
-//! - 112 bytes: audit_start (AuditTag)
-//! - 112 bytes: audit_end (AuditTag)
-//! - 4 bytes: unknown
-//! - 60 bytes: unknown area
-//! - 2056 bytes: tag (UTF-16LE, 1028 chars)
+//! Matches .NET FileHeaderStruct [LayoutKind.Sequential, CharSet.Unicode]:
+//!   FinnID(ushort,2) + FinnSig(ByValTStr[16]=32) + FileType(ushort,2) + FileRev(ushort,2)
+//!   + pad(2) + Created(UserIdStampStruct=108) + CheckSum(uint,4) + Changed(108)
+//!   + TimesEdited(ushort,2) + TimesCalibrated(ushort,2) + Reserved(uint[16]=64)
+//!   + FileDescription(ByValTStr[512]=1024) = 1352 bytes total
+//!
+//! Our field mapping (reads match .NET byte offsets):
+//! - 2 bytes: magic (FinnID)
+//! - 18 bytes: signature (part of FinnSig)
+//! - 16 bytes: rest of FinnSig + FileType + FileRev + padding
+//! - 4 bytes: version (FileRev as u32, includes padding)
+//! - 112 bytes: audit_start (UserIdStampStruct + CheckSum)
+//! - 112 bytes: audit_end (UserIdStampStruct)
+//! - 4 bytes: TimesEdited + TimesCalibrated
+//! - 60 bytes: Reserved (64 bytes minus 4 already consumed)
+//! - 1024 bytes: FileDescription (UTF-16LE, 512 chars)
 
 use crate::io_utils::BinaryReader;
 use crate::version::FINNIGAN_MAGIC;
@@ -71,7 +77,7 @@ impl FileHeader {
         let _unknown5 = reader.read_u32()?;
         reader.skip(60)?; // unknown area
 
-        let tag = reader.read_utf16_fixed(2056)?; // 1028 UTF-16 chars
+        let tag = reader.read_utf16_fixed(1024)?; // 512 UTF-16 chars (FileDescription)
 
         Ok(Self {
             magic,
@@ -84,9 +90,9 @@ impl FileHeader {
         })
     }
 
-    /// Size of the FileHeader in bytes.
+    /// Size of the FileHeader in bytes (matches .NET Marshal.SizeOf<FileHeaderStruct> = 1352).
     pub fn size() -> usize {
-        2 + 18 + 16 + 4 + 112 + 112 + 4 + 60 + 2056
+        2 + 18 + 16 + 4 + 112 + 112 + 4 + 60 + 1024
     }
 }
 

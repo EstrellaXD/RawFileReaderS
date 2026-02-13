@@ -106,27 +106,26 @@ pub fn decode_ftlt_scan(
     let profile_bytes = header.num_profile_words as u64 * 4;
 
     // Decode profile data if this is a profile packet type (19 or 21)
-    let (profile_mz, profile_intensity) = if (packet_type_id == 19 || packet_type_id == 21)
-        && header.num_profile_words > 0
-    {
-        let is_ft = !header.is_lt_mode();
-        match decode_ftlt_profile(&mut reader, &header, conversion_params, is_ft) {
-            Ok((mz, int)) => {
-                // Ensure reader is past the profile section
-                reader.set_position(profile_start + profile_bytes);
-                (Some(mz), Some(int))
+    let (profile_mz, profile_intensity) =
+        if (packet_type_id == 19 || packet_type_id == 21) && header.num_profile_words > 0 {
+            let is_ft = !header.is_lt_mode();
+            match decode_ftlt_profile(&mut reader, &header, conversion_params, is_ft) {
+                Ok((mz, int)) => {
+                    // Ensure reader is past the profile section
+                    reader.set_position(profile_start + profile_bytes);
+                    (Some(mz), Some(int))
+                }
+                Err(_) => {
+                    // Skip profile data on decode failure
+                    reader.set_position(profile_start + profile_bytes);
+                    (None, None)
+                }
             }
-            Err(_) => {
-                // Skip profile data on decode failure
-                reader.set_position(profile_start + profile_bytes);
-                (None, None)
-            }
-        }
-    } else {
-        // Skip profile data for centroid-only packets (18, 20)
-        reader.set_position(profile_start + profile_bytes);
-        (None, None)
-    };
+        } else {
+            // Skip profile data for centroid-only packets (18, 20)
+            reader.set_position(profile_start + profile_bytes);
+            (None, None)
+        };
 
     // Mark the start of centroid data
     let centroid_start = reader.position();
@@ -327,7 +326,7 @@ mod tests {
         // 1 segment, 3 peaks at standard accuracy (f32 mass + f32 intensity)
         // Centroid data: u32 count=3, then 3 * (f32, f32) = 24 bytes = 6 words
         let mut data = build_ftlt_header_bytes(1, 0, 7, 0); // 7 words = 28 bytes (4 for count + 24 for peaks)
-        // Segment mass range
+                                                            // Segment mass range
         data.extend_from_slice(&100.0f32.to_le_bytes());
         data.extend_from_slice(&1000.0f32.to_le_bytes());
         // Centroid data: count=3

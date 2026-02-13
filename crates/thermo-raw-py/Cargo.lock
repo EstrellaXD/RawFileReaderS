@@ -33,7 +33,7 @@ dependencies = [
 
 [[package]]
 name = "cfb-reader"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "cfb",
 ]
@@ -411,7 +411,7 @@ checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 
 [[package]]
 name = "thermo-raw"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "byteorder",
  "cfb-reader",
@@ -424,7 +424,7 @@ dependencies = [
 
 [[package]]
 name = "thermo-raw-py"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "numpy",
  "pyo3",
