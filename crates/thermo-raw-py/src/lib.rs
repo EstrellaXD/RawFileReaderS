@@ -1,7 +1,7 @@
 use numpy::{IntoPyArray, PyArray1, PyArray3, PyArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use ::thermo_raw::{MsLevel, RawFile as InnerRawFile};
+use ::thermo_raw::{MsLevel, RawFile as InnerRawFile, AcquisitionType};
 use ::thermo_raw::progress::{self, ProgressCounter};
 use std::path::Path;
 use std::sync::Arc;
@@ -321,6 +321,134 @@ impl RawFile {
         Ok(results)
     }
 
+    // ─── MS2/DDA/DIA API ───
+
+    /// Get the MS level of a scan (by scan number). Returns 1, 2, 3, etc.
+    fn ms_level_of_scan(&self, scan_number: u32) -> PyResult<u8> {
+        let idx = scan_number
+            .checked_sub(self.inner.first_scan())
+            .ok_or_else(|| PyValueError::new_err(format!("Scan {} out of range", scan_number)))?;
+        Ok(match self.inner.ms_level_of_scan(idx) {
+            MsLevel::Ms1 => 1,
+            MsLevel::Ms2 => 2,
+            MsLevel::Ms3 => 3,
+            MsLevel::Other(n) => n,
+        })
+    }
+
+    /// Check if a scan is MS2.
+    fn is_ms2_scan(&self, scan_number: u32) -> PyResult<bool> {
+        let idx = scan_number
+            .checked_sub(self.inner.first_scan())
+            .ok_or_else(|| PyValueError::new_err(format!("Scan {} out of range", scan_number)))?;
+        Ok(self.inner.is_ms2_scan(idx))
+    }
+
+    /// Get all scan numbers at a given MS level (1, 2, 3, ...).
+    fn scan_numbers_by_level(&self, level: u8) -> Vec<u32> {
+        let ms_level = match level {
+            1 => MsLevel::Ms1,
+            2 => MsLevel::Ms2,
+            3 => MsLevel::Ms3,
+            n => MsLevel::Other(n),
+        };
+        self.inner.scan_numbers_by_level(ms_level)
+    }
+
+    /// Get lightweight metadata for all MS2 scans (no scan data decoding).
+    fn all_ms2_scan_info(&self) -> Vec<PyMs2ScanInfo> {
+        self.inner
+            .all_ms2_scan_info()
+            .iter()
+            .map(PyMs2ScanInfo::from)
+            .collect()
+    }
+
+    /// Find MS2 scans matching a precursor m/z within ppm tolerance.
+    #[pyo3(signature = (precursor_mz, tolerance_ppm=10.0))]
+    fn ms2_scans_for_precursor(
+        &self,
+        precursor_mz: f64,
+        tolerance_ppm: f64,
+    ) -> Vec<PyMs2ScanInfo> {
+        self.inner
+            .ms2_scans_for_precursor(precursor_mz, tolerance_ppm)
+            .iter()
+            .map(PyMs2ScanInfo::from)
+            .collect()
+    }
+
+    /// Get sorted, deduplicated list of unique precursor m/z values as a numpy array.
+    fn precursor_list<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.inner.precursor_list().into_pyarray(py)
+    }
+
+    /// Find the parent MS1 scan number for a given scan.
+    fn parent_ms1_scan(&self, scan_number: u32) -> Option<u32> {
+        self.inner.parent_ms1_scan(scan_number)
+    }
+
+    /// Classify the acquisition type: "ms1_only", "dda", "dia", or "mixed".
+    fn acquisition_type(&self) -> &'static str {
+        match self.inner.acquisition_type() {
+            AcquisitionType::Ms1Only => "ms1_only",
+            AcquisitionType::Dda => "dda",
+            AcquisitionType::Dia => "dia",
+            AcquisitionType::Mixed => "mixed",
+        }
+    }
+
+    /// Get unique DIA isolation windows.
+    fn isolation_windows(&self) -> Vec<PyIsolationWindow> {
+        self.inner
+            .isolation_windows()
+            .iter()
+            .map(PyIsolationWindow::from)
+            .collect()
+    }
+
+    /// Get MS2 scans belonging to a specific isolation window.
+    fn scans_for_window(&self, window: &PyIsolationWindow) -> Vec<PyMs2ScanInfo> {
+        let w = ::thermo_raw::IsolationWindow {
+            center_mz: window.center_mz,
+            isolation_width: window.isolation_width,
+            low_mz: window.low_mz,
+            high_mz: window.high_mz,
+            collision_energy: window.collision_energy,
+            activation: window.activation.clone(),
+        };
+        self.inner
+            .scans_for_window(&w)
+            .iter()
+            .map(PyMs2ScanInfo::from)
+            .collect()
+    }
+
+    /// XIC within a specific DIA isolation window.
+    fn xic_ms2_window<'py>(
+        &self,
+        py: Python<'py>,
+        mz: f64,
+        ppm: f64,
+        window: &PyIsolationWindow,
+    ) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
+        let w = ::thermo_raw::IsolationWindow {
+            center_mz: window.center_mz,
+            isolation_width: window.isolation_width,
+            low_mz: window.low_mz,
+            high_mz: window.high_mz,
+            collision_energy: window.collision_energy,
+            activation: window.activation.clone(),
+        };
+        let chrom = self
+            .inner
+            .xic_ms2_window(mz, ppm, &w)
+            .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
+        let rt = chrom.rt.into_pyarray(py);
+        let intensity = chrom.intensity.into_pyarray(py);
+        Ok((rt, intensity))
+    }
+
     /// Get trailer extra fields for a scan as a dict.
     fn trailer_extra(&self, scan_number: u32) -> PyResult<std::collections::HashMap<String, String>> {
         self.inner
@@ -358,6 +486,94 @@ struct ScanInfo {
     precursor_mz: Option<f64>,
     #[pyo3(get)]
     precursor_charge: Option<i32>,
+}
+
+/// DIA isolation window metadata.
+#[pyclass]
+#[derive(Debug, Clone)]
+struct PyIsolationWindow {
+    #[pyo3(get)]
+    center_mz: f64,
+    #[pyo3(get)]
+    isolation_width: f64,
+    #[pyo3(get)]
+    low_mz: f64,
+    #[pyo3(get)]
+    high_mz: f64,
+    #[pyo3(get)]
+    collision_energy: f64,
+    #[pyo3(get)]
+    activation: String,
+}
+
+#[pymethods]
+impl PyIsolationWindow {
+    fn __repr__(&self) -> String {
+        format!(
+            "IsolationWindow(center_mz={:.4}, width={:.1}, ce={:.1}, activation={})",
+            self.center_mz, self.isolation_width, self.collision_energy, self.activation
+        )
+    }
+}
+
+impl From<&::thermo_raw::IsolationWindow> for PyIsolationWindow {
+    fn from(w: &::thermo_raw::IsolationWindow) -> Self {
+        Self {
+            center_mz: w.center_mz,
+            isolation_width: w.isolation_width,
+            low_mz: w.low_mz,
+            high_mz: w.high_mz,
+            collision_energy: w.collision_energy,
+            activation: w.activation.clone(),
+        }
+    }
+}
+
+/// Lightweight MS2 scan metadata.
+#[pyclass]
+#[derive(Debug, Clone)]
+struct PyMs2ScanInfo {
+    #[pyo3(get)]
+    scan_number: u32,
+    #[pyo3(get)]
+    rt: f64,
+    #[pyo3(get)]
+    precursor_mz: f64,
+    #[pyo3(get)]
+    isolation_width: f64,
+    #[pyo3(get)]
+    collision_energy: f64,
+    #[pyo3(get)]
+    activation: String,
+    #[pyo3(get)]
+    scan_event_index: u16,
+    #[pyo3(get)]
+    tic: f64,
+}
+
+#[pymethods]
+impl PyMs2ScanInfo {
+    fn __repr__(&self) -> String {
+        format!(
+            "Ms2ScanInfo(scan={}, rt={:.2}, precursor={:.4}, ce={:.1})",
+            self.scan_number, self.rt, self.precursor_mz, self.collision_energy
+        )
+    }
+}
+
+impl From<&::thermo_raw::Ms2ScanInfo> for PyMs2ScanInfo {
+    fn from(info: &::thermo_raw::Ms2ScanInfo) -> Self {
+        Self {
+            scan_number: info.scan_number,
+            rt: info.rt,
+            precursor_mz: info.precursor_mz,
+            isolation_width: info.isolation_width,
+            collision_energy: info.collision_energy,
+            activation: info.activation.clone(),
+            scan_event_index: info.scan_event_index,
+            tic: info.tic,
+        }
+    }
 }
 
 /// Batch XIC across multiple RAW files, returning a 3D numpy tensor.
@@ -432,6 +648,8 @@ fn batch_xic<'py>(
 fn raw_file_reader_s(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RawFile>()?;
     m.add_class::<ScanInfo>()?;
+    m.add_class::<PyIsolationWindow>()?;
+    m.add_class::<PyMs2ScanInfo>()?;
     m.add_function(wrap_pyfunction!(batch_xic, m)?)?;
     Ok(())
 }

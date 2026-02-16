@@ -1,6 +1,6 @@
 [package]
 name = "thermo-raw-mzml"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Convert Thermo RAW files to indexed mzML format"
 

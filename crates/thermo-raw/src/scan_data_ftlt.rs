@@ -341,8 +341,7 @@ pub fn decode_ftlt_centroids_only(
         } else {
             for i in 0..count as usize {
                 let base = i * 8;
-                let mz =
-                    f32::from_le_bytes(raw[base..base + 4].try_into().unwrap()) as f64;
+                let mz = f32::from_le_bytes(raw[base..base + 4].try_into().unwrap()) as f64;
                 let intensity =
                     f32::from_le_bytes(raw[base + 4..base + 8].try_into().unwrap()) as f64;
                 all_mz.push(mz);

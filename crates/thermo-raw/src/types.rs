@@ -65,3 +65,36 @@ pub struct FileMetadata {
     pub sample_name: String,
     pub comment: String,
 }
+
+/// Acquisition type classification based on MS2 scan event properties.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AcquisitionType {
+    Ms1Only,
+    Dda,
+    Dia,
+    Mixed,
+}
+
+/// A unique DIA isolation window derived from MS2 scan events.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IsolationWindow {
+    pub center_mz: f64,
+    pub isolation_width: f64,
+    pub low_mz: f64,
+    pub high_mz: f64,
+    pub collision_energy: f64,
+    pub activation: String,
+}
+
+/// Lightweight MS2 scan metadata derived from ScanIndex + ScanEvent (no scan data decode).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Ms2ScanInfo {
+    pub scan_number: u32,
+    pub rt: f64,
+    pub precursor_mz: f64,
+    pub isolation_width: f64,
+    pub collision_energy: f64,
+    pub activation: String,
+    pub scan_event_index: u16,
+    pub tic: f64,
+}

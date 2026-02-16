@@ -47,4 +47,5 @@ pub use batch::{batch_xic_ms1, batch_xic_ms1_with_progress, BatchXicResult};
 pub use error::RawError;
 pub use progress::{new_counter, ProgressCounter};
 pub use raw_file::{diagnose, DebugInfo, DiagnosticReport, DiagnosticStage, RawFile};
+pub use scan_event::ActivationType;
 pub use types::*;

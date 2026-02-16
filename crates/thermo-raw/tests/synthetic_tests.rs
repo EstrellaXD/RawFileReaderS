@@ -9,6 +9,7 @@ use thermo_raw::scan_event::{
     frequency_to_mz, ActivationType, AnalyzerType, IonizationType, ScanMode, ScanType,
 };
 use thermo_raw::scan_filter;
+use thermo_raw::types::{AcquisitionType, IsolationWindow, Ms2ScanInfo};
 use thermo_raw::validation;
 
 /// Build a minimal centroid data buffer: count + (f32 mz, f32 intensity) pairs.
@@ -341,4 +342,139 @@ fn test_serde_roundtrip_scan_event() {
     let deserialized: thermo_raw::scan_event::ScanEvent = serde_json::from_str(&json).unwrap();
     assert_eq!(deserialized.preamble.analyzer, AnalyzerType::Ftms);
     assert_eq!(deserialized.conversion_params.len(), 4);
+}
+
+// ─── MS2/DDA/DIA Type Tests ───
+
+#[test]
+fn test_serde_roundtrip_acquisition_type() {
+    for acq in [
+        AcquisitionType::Ms1Only,
+        AcquisitionType::Dda,
+        AcquisitionType::Dia,
+        AcquisitionType::Mixed,
+    ] {
+        let json = serde_json::to_string(&acq).unwrap();
+        let deserialized: AcquisitionType = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, acq);
+    }
+}
+
+#[test]
+fn test_serde_roundtrip_isolation_window() {
+    let window = IsolationWindow {
+        center_mz: 500.25,
+        isolation_width: 25.0,
+        low_mz: 487.75,
+        high_mz: 512.75,
+        collision_energy: 30.0,
+        activation: "HCD".to_string(),
+    };
+
+    let json = serde_json::to_string(&window).unwrap();
+    let deserialized: IsolationWindow = serde_json::from_str(&json).unwrap();
+    assert_eq!(deserialized, window);
+    assert!((deserialized.center_mz - 500.25).abs() < 1e-10);
+    assert_eq!(deserialized.activation, "HCD");
+}
+
+#[test]
+fn test_serde_roundtrip_ms2_scan_info() {
+    let info = Ms2ScanInfo {
+        scan_number: 42,
+        rt: 5.678,
+        precursor_mz: 524.2648,
+        isolation_width: 1.5,
+        collision_energy: 28.0,
+        activation: "HCD".to_string(),
+        scan_event_index: 3,
+        tic: 1.5e6,
+    };
+
+    let json = serde_json::to_string(&info).unwrap();
+    let deserialized: Ms2ScanInfo = serde_json::from_str(&json).unwrap();
+    assert_eq!(deserialized.scan_number, 42);
+    assert!((deserialized.precursor_mz - 524.2648).abs() < 1e-4);
+    assert_eq!(deserialized.scan_event_index, 3);
+}
+
+#[test]
+fn test_isolation_window_boundary_computation() {
+    let center = 500.0;
+    let width = 25.0;
+    let window = IsolationWindow {
+        center_mz: center,
+        isolation_width: width,
+        low_mz: center - width / 2.0,
+        high_mz: center + width / 2.0,
+        collision_energy: 30.0,
+        activation: "HCD".to_string(),
+    };
+
+    assert!((window.low_mz - 487.5).abs() < 1e-10);
+    assert!((window.high_mz - 512.5).abs() < 1e-10);
+    assert!((window.high_mz - window.low_mz - width).abs() < 1e-10);
+}
+
+#[test]
+fn test_isolation_window_narrow() {
+    let center = 524.2648;
+    let width = 1.5;
+    let window = IsolationWindow {
+        center_mz: center,
+        isolation_width: width,
+        low_mz: center - width / 2.0,
+        high_mz: center + width / 2.0,
+        collision_energy: 28.0,
+        activation: "HCD".to_string(),
+    };
+
+    assert!((window.low_mz - 523.5148).abs() < 1e-4);
+    assert!((window.high_mz - 525.0148).abs() < 1e-4);
+}
+
+#[test]
+fn test_acquisition_type_equality() {
+    assert_eq!(AcquisitionType::Dda, AcquisitionType::Dda);
+    assert_ne!(AcquisitionType::Dda, AcquisitionType::Dia);
+    assert_ne!(AcquisitionType::Ms1Only, AcquisitionType::Mixed);
+}
+
+#[test]
+fn test_precursor_deduplication_logic() {
+    // Simulate the deduplication algorithm from precursor_list()
+    let mut mzs = vec![524.2648, 524.2649, 600.3, 600.305, 700.0];
+    mzs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mut deduped: Vec<f64> = Vec::new();
+    for mz in mzs {
+        if deduped
+            .last()
+            .is_none_or(|&last: &f64| (mz - last).abs() > 0.01)
+        {
+            deduped.push(mz);
+        }
+    }
+    // 524.2648 and 524.2649 should collapse (diff = 0.0001 < 0.01)
+    // 600.3 and 600.305 should collapse (diff = 0.005 < 0.01)
+    assert_eq!(deduped.len(), 3);
+    assert!((deduped[0] - 524.2648).abs() < 1e-4);
+    assert!((deduped[1] - 600.3).abs() < 1e-1);
+    assert!((deduped[2] - 700.0).abs() < 1e-10);
+}
+
+#[test]
+fn test_precursor_deduplication_distinct_values() {
+    let mut mzs = vec![400.0, 500.0, 600.0, 700.0];
+    mzs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mut deduped: Vec<f64> = Vec::new();
+    for mz in mzs {
+        if deduped
+            .last()
+            .is_none_or(|&last: &f64| (mz - last).abs() > 0.01)
+        {
+            deduped.push(mz);
+        }
+    }
+    // All values are far apart, none should collapse
+    assert_eq!(deduped.len(), 4);
 }

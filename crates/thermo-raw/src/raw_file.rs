@@ -12,7 +12,10 @@ use crate::scan_event::{self, ScanEvent};
 use crate::scan_filter;
 use crate::scan_index::{self, ScanIndexEntry};
 use crate::trailer::{self, TrailerLayout};
-use crate::types::{Chromatogram, FileMetadata, MsLevel, PrecursorInfo, Scan};
+use crate::types::{
+    AcquisitionType, Chromatogram, FileMetadata, IsolationWindow, Ms2ScanInfo, MsLevel,
+    PrecursorInfo, Scan,
+};
 use crate::version;
 use crate::RawError;
 use std::collections::HashMap;
@@ -76,6 +79,10 @@ pub struct RawFile {
     scan_events_addr: u64,
     /// Lazily parsed scan events (unique event templates, indexed by scan_event field).
     scan_events: OnceLock<Vec<ScanEvent>>,
+    /// Cached MS2 scan info (lazily computed on first access).
+    ms2_scan_info: OnceLock<Vec<Ms2ScanInfo>>,
+    /// Cached acquisition type (lazily computed on first access).
+    acquisition_type_cache: OnceLock<AcquisitionType>,
 }
 
 impl RawFile {
@@ -178,6 +185,8 @@ impl RawFile {
             trailer_layout,
             scan_events_addr,
             scan_events: OnceLock::new(),
+            ms2_scan_info: OnceLock::new(),
+            acquisition_type_cache: OnceLock::new(),
         })
     }
 
@@ -753,6 +762,326 @@ impl RawFile {
         let container =
             cfb_reader::Ole2Container::open(path).map_err(|e| RawError::CfbError(e.to_string()))?;
         Ok(container.list_streams())
+    }
+
+    // ─── MS Level Filtering (ScanEvent-based, O(1) per scan) ───
+
+    /// Get the MS level of a scan by index (0-based).
+    ///
+    /// Uses the ScanEvent preamble for O(1) lookup without scan data decoding.
+    /// Falls back to `MsLevel::Ms1` if the scan event is unavailable.
+    pub fn ms_level_of_scan(&self, scan_idx: u32) -> MsLevel {
+        let entry = match self.scan_index.get(scan_idx as usize) {
+            Some(e) => e,
+            None => return MsLevel::Ms1,
+        };
+        match self.scan_events_lazy().get(entry.scan_event as usize) {
+            Some(event) => event.preamble.ms_level,
+            None => MsLevel::Ms1,
+        }
+    }
+
+    /// Check if a scan is MS2 by index (0-based).
+    pub fn is_ms2_scan(&self, scan_idx: u32) -> bool {
+        matches!(self.ms_level_of_scan(scan_idx), MsLevel::Ms2)
+    }
+
+    /// Get scan numbers for all scans at a given MS level.
+    pub fn scan_numbers_by_level(&self, level: MsLevel) -> Vec<u32> {
+        let first = self.run_header.first_scan;
+        self.scan_index
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| self.ms_level_of_scan(*idx as u32) == level)
+            .map(|(idx, _)| first + idx as u32)
+            .collect()
+    }
+
+    /// Get lightweight metadata for all MS2 scans (cached).
+    ///
+    /// Populates from ScanIndex + ScanEvent without any scan data decoding.
+    pub fn all_ms2_scan_info(&self) -> &[Ms2ScanInfo] {
+        self.ms2_scan_info_lazy()
+    }
+
+    // ─── DDA Precursor Queries ───
+
+    /// Find MS2 scans whose precursor m/z matches within a ppm tolerance.
+    pub fn ms2_scans_for_precursor(
+        &self,
+        precursor_mz: f64,
+        tolerance_ppm: f64,
+    ) -> Vec<Ms2ScanInfo> {
+        let half = precursor_mz * tolerance_ppm * 1e-6;
+        let low = precursor_mz - half;
+        let high = precursor_mz + half;
+        self.ms2_scan_info_lazy()
+            .iter()
+            .filter(|info| info.precursor_mz >= low && info.precursor_mz <= high)
+            .cloned()
+            .collect()
+    }
+
+    /// Get sorted, deduplicated list of unique precursor m/z values from all MS2 scans.
+    ///
+    /// Values within 0.01 Da of each other are collapsed to a single entry.
+    pub fn precursor_list(&self) -> Vec<f64> {
+        let mut mzs: Vec<f64> = self
+            .ms2_scan_info_lazy()
+            .iter()
+            .map(|info| info.precursor_mz)
+            .filter(|&mz| mz > 0.0)
+            .collect();
+        mzs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        // Deduplicate within 0.01 Da
+        let mut deduped = Vec::with_capacity(mzs.len());
+        for mz in mzs {
+            if deduped
+                .last()
+                .is_none_or(|&last: &f64| (mz - last).abs() > 0.01)
+            {
+                deduped.push(mz);
+            }
+        }
+        deduped
+    }
+
+    /// Find the parent MS1 scan for a given scan number.
+    ///
+    /// Strategy 1: trailer "Master Scan Number" field (accurate, requires trailer).
+    /// Strategy 2: walk backwards through scan index to find nearest MS1.
+    pub fn parent_ms1_scan(&self, scan_number: u32) -> Option<u32> {
+        let scan_idx = scan_number.checked_sub(self.run_header.first_scan)?;
+
+        // Strategy 1: trailer Master Scan Number
+        if let Some(layout) = &self.trailer_layout {
+            if let Some(master_idx) = layout.master_scan_idx {
+                if let Ok(master) = layout.read_i32(&self.data, scan_idx, master_idx) {
+                    if master > 0 {
+                        return Some(master as u32);
+                    }
+                }
+            }
+        }
+
+        // Strategy 2: walk backwards to find nearest MS1
+        if scan_idx == 0 {
+            return None;
+        }
+        for idx in (0..scan_idx).rev() {
+            if matches!(self.ms_level_of_scan(idx), MsLevel::Ms1) {
+                return Some(self.run_header.first_scan + idx);
+            }
+        }
+        None
+    }
+
+    // ─── DIA Window Support ───
+
+    /// Classify the acquisition type based on MS2 scan event properties.
+    ///
+    /// - `Ms1Only`: no MS2 scans
+    /// - `Dda`: all MS2 scans have `dependent=true`
+    /// - `Dia`: all MS2 scans have `dependent=false`
+    /// - `Mixed`: mix of dependent and non-dependent MS2 scans
+    pub fn acquisition_type(&self) -> AcquisitionType {
+        *self.acquisition_type_cache.get_or_init(|| {
+            let events = self.scan_events_lazy();
+            // Collect unique MS2 scan event indices
+            let mut ms2_event_indices: Vec<u16> = self
+                .scan_index
+                .iter()
+                .enumerate()
+                .filter(|(idx, _)| self.is_ms2_scan(*idx as u32))
+                .map(|(_, entry)| entry.scan_event)
+                .collect();
+            ms2_event_indices.sort_unstable();
+            ms2_event_indices.dedup();
+
+            if ms2_event_indices.is_empty() {
+                return AcquisitionType::Ms1Only;
+            }
+
+            let mut has_dependent = false;
+            let mut has_independent = false;
+            for &event_idx in &ms2_event_indices {
+                if let Some(event) = events.get(event_idx as usize) {
+                    if event.preamble.dependent {
+                        has_dependent = true;
+                    } else {
+                        has_independent = true;
+                    }
+                }
+            }
+
+            match (has_dependent, has_independent) {
+                (true, false) => AcquisitionType::Dda,
+                (false, true) => AcquisitionType::Dia,
+                (true, true) => AcquisitionType::Mixed,
+                (false, false) => AcquisitionType::Ms1Only,
+            }
+        })
+    }
+
+    /// Get unique DIA isolation windows from MS2 scan events.
+    ///
+    /// Deduplicates by (center_mz, isolation_width) within 0.01 Da tolerance.
+    /// Returns windows sorted by center_mz.
+    pub fn isolation_windows(&self) -> Vec<IsolationWindow> {
+        let events = self.scan_events_lazy();
+        // Collect unique MS2 scan event indices
+        let mut ms2_event_indices: Vec<u16> = self
+            .scan_index
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| self.is_ms2_scan(*idx as u32))
+            .map(|(_, entry)| entry.scan_event)
+            .collect();
+        ms2_event_indices.sort_unstable();
+        ms2_event_indices.dedup();
+
+        let mut windows: Vec<IsolationWindow> = Vec::new();
+        for &event_idx in &ms2_event_indices {
+            if let Some(event) = events.get(event_idx as usize) {
+                if let Some(rxn) = event.reactions.last() {
+                    let center = rxn.precursor_mz;
+                    let width = rxn.isolation_width;
+                    // Deduplicate within 0.01 Da on center_mz and width
+                    let is_dup = windows.iter().any(|w| {
+                        (w.center_mz - center).abs() < 0.01
+                            && (w.isolation_width - width).abs() < 0.01
+                    });
+                    if !is_dup && center > 0.0 {
+                        windows.push(IsolationWindow {
+                            center_mz: center,
+                            isolation_width: width,
+                            low_mz: center - width / 2.0,
+                            high_mz: center + width / 2.0,
+                            collision_energy: rxn.collision_energy,
+                            activation: format!("{}", rxn.activation_type()),
+                        });
+                    }
+                }
+            }
+        }
+        windows.sort_by(|a, b| {
+            a.center_mz
+                .partial_cmp(&b.center_mz)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        windows
+    }
+
+    /// Get MS2 scan info entries that belong to a specific isolation window.
+    ///
+    /// Matches by scan_event_index: compares the ScanEvent's Reaction against
+    /// the window's center_mz and isolation_width.
+    pub fn scans_for_window(&self, window: &IsolationWindow) -> Vec<Ms2ScanInfo> {
+        self.ms2_scan_info_lazy()
+            .iter()
+            .filter(|info| self.matches_window_by_event(info.scan_event_index, window))
+            .cloned()
+            .collect()
+    }
+
+    /// XIC within a specific DIA isolation window.
+    ///
+    /// Only decodes scans matching the window, using rayon for parallelism.
+    pub fn xic_ms2_window(
+        &self,
+        target_mz: f64,
+        tolerance_ppm: f64,
+        window: &IsolationWindow,
+    ) -> Result<Chromatogram, RawError> {
+        use rayon::prelude::*;
+        let half_width = target_mz * tolerance_ppm * 1e-6;
+        let low = target_mz - half_width;
+        let high = target_mz + half_width;
+
+        let results: Vec<Option<(f64, f64)>> = self
+            .scan_index
+            .par_iter()
+            .enumerate()
+            .map(|(idx, entry)| {
+                // Only process MS2 scans matching this window
+                if !self.is_ms2_scan(idx as u32)
+                    || !self.matches_window_by_event(entry.scan_event, window)
+                {
+                    return None;
+                }
+
+                // Pre-filter by m/z range
+                if entry.low_mz > 0.0
+                    && entry.high_mz > 0.0
+                    && (entry.high_mz < low || entry.low_mz > high)
+                {
+                    return Some((entry.rt, 0.0));
+                }
+
+                let (cmz, cint) = match scan_data::decode_centroids_only(
+                    &self.data,
+                    self.data_addr as usize,
+                    entry,
+                ) {
+                    Ok(pair) => pair,
+                    Err(_) => return Some((entry.rt, 0.0)),
+                };
+                let intensity: f64 = cmz
+                    .iter()
+                    .zip(cint.iter())
+                    .filter(|(&mz, _)| mz >= low && mz <= high)
+                    .map(|(_, &int)| int)
+                    .sum();
+                Some((entry.rt, intensity))
+            })
+            .collect();
+
+        let filtered: Vec<_> = results.into_iter().flatten().collect();
+        Ok(Chromatogram {
+            rt: filtered.iter().map(|(rt, _)| *rt).collect(),
+            intensity: filtered.iter().map(|(_, int)| *int).collect(),
+        })
+    }
+
+    // ─── Private MS2 Helpers ───
+
+    /// Lazily compute and cache MS2 scan info.
+    fn ms2_scan_info_lazy(&self) -> &Vec<Ms2ScanInfo> {
+        self.ms2_scan_info.get_or_init(|| {
+            let events = self.scan_events_lazy();
+            let first = self.run_header.first_scan;
+            self.scan_index
+                .iter()
+                .enumerate()
+                .filter(|(idx, _)| self.is_ms2_scan(*idx as u32))
+                .filter_map(|(idx, entry)| {
+                    let event = events.get(entry.scan_event as usize)?;
+                    let rxn = event.reactions.last()?;
+                    Some(Ms2ScanInfo {
+                        scan_number: first + idx as u32,
+                        rt: entry.rt,
+                        precursor_mz: rxn.precursor_mz,
+                        isolation_width: rxn.isolation_width,
+                        collision_energy: rxn.collision_energy,
+                        activation: format!("{}", rxn.activation_type()),
+                        scan_event_index: entry.scan_event,
+                        tic: entry.tic,
+                    })
+                })
+                .collect()
+        })
+    }
+
+    /// Check if a scan event matches a given isolation window.
+    fn matches_window_by_event(&self, scan_event_idx: u16, window: &IsolationWindow) -> bool {
+        let events = self.scan_events_lazy();
+        if let Some(event) = events.get(scan_event_idx as usize) {
+            if let Some(rxn) = event.reactions.last() {
+                return (rxn.precursor_mz - window.center_mz).abs() < 0.01
+                    && (rxn.isolation_width - window.isolation_width).abs() < 0.01;
+            }
+        }
+        false
     }
 
     /// Look up conversion parameters for a scan from its ScanEvent.
