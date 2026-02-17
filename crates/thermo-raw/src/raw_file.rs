@@ -23,6 +23,28 @@ use std::ops::Deref;
 use std::path::Path;
 use std::sync::OnceLock;
 
+/// Sum intensities where m/z falls within [low, high], using binary search.
+///
+/// Centroid m/z arrays are sorted in ascending order. Binary search finds the
+/// first index >= low in O(log n), then walks forward only until > high.
+/// This matches Thermo's `FastBinarySearch` + linear walk approach.
+#[inline]
+fn sum_intensity_in_range(mz: &[f64], intensity: &[f64], low: f64, high: f64) -> f64 {
+    if mz.is_empty() {
+        return 0.0;
+    }
+    // Binary search: find first index where mz[i] >= low
+    let start = mz.partition_point(|&v| v < low);
+    let mut sum = 0.0;
+    let len = mz.len();
+    let mut i = start;
+    while i < len && mz[i] <= high {
+        sum += intensity[i];
+        i += 1;
+    }
+    sum
+}
+
 /// Diagnostic information for debugging address resolution.
 pub struct DebugInfo {
     pub file_size: u64,
@@ -309,7 +331,7 @@ impl RawFile {
     /// Uses scan index m/z ranges to skip scans that cannot contain the target,
     /// avoiding expensive scan data decoding for irrelevant scans.
     pub fn xic(&self, target_mz: f64, tolerance_ppm: f64) -> Result<Chromatogram, RawError> {
-        self.xic_inner(target_mz, tolerance_ppm, false)
+        self.xic_inner(target_mz, tolerance_ppm, false, None)
     }
 
     /// Extracted ion chromatogram restricted to MS1 scans only.
@@ -318,7 +340,7 @@ impl RawFile {
     /// decoding their data. For DDA data this typically reduces scans to process
     /// by 85-95%, making it competitive with or faster than the .NET library.
     pub fn xic_ms1(&self, target_mz: f64, tolerance_ppm: f64) -> Result<Chromatogram, RawError> {
-        self.xic_inner(target_mz, tolerance_ppm, true)
+        self.xic_inner(target_mz, tolerance_ppm, true, None)
     }
 
     /// Batch extracted ion chromatograms for multiple targets (MS1 only, single pass).
@@ -326,81 +348,7 @@ impl RawFile {
     /// Decodes each MS1 scan once and extracts intensities for all targets,
     /// avoiding redundant scan decoding when extracting multiple XICs.
     pub fn xic_batch_ms1(&self, targets: &[(f64, f64)]) -> Result<Vec<Chromatogram>, RawError> {
-        use rayon::prelude::*;
-
-        let ranges: Vec<(f64, f64)> = targets
-            .iter()
-            .map(|&(mz, ppm)| {
-                let half = mz * ppm * 1e-6;
-                (mz - half, mz + half)
-            })
-            .collect();
-        let n_targets = targets.len();
-
-        // Each MS1 scan produces (rt, Vec<intensity_per_target>); MS2 scans produce None.
-        let per_scan: Vec<Option<(f64, Vec<f64>)>> = self
-            .scan_index
-            .par_iter()
-            .enumerate()
-            .map(|(idx, entry)| {
-                if !self.is_ms1_scan(idx as u32) {
-                    return None;
-                }
-
-                // Check if any target overlaps this scan's m/z range
-                let any_overlap = if entry.low_mz > 0.0 && entry.high_mz > 0.0 {
-                    ranges
-                        .iter()
-                        .any(|&(low, high)| entry.high_mz >= low && entry.low_mz <= high)
-                } else {
-                    true
-                };
-
-                if !any_overlap {
-                    return Some((entry.rt, vec![0.0; n_targets]));
-                }
-
-                let (cmz, cint) = match scan_data::decode_centroids_only(
-                    &self.data,
-                    self.data_addr as usize,
-                    entry,
-                ) {
-                    Ok(pair) => pair,
-                    Err(_) => return Some((entry.rt, vec![0.0; n_targets])),
-                };
-
-                let intensities: Vec<f64> = ranges
-                    .iter()
-                    .map(|&(low, high)| {
-                        cmz.iter()
-                            .zip(cint.iter())
-                            .filter(|(&mz, _)| mz >= low && mz <= high)
-                            .map(|(_, &int)| int)
-                            .sum()
-                    })
-                    .collect();
-
-                Some((entry.rt, intensities))
-            })
-            .collect();
-
-        // Transpose: Vec<(rt, Vec<intensity>)> → Vec<Chromatogram>
-        let filtered: Vec<_> = per_scan.into_iter().flatten().collect();
-        let mut rts: Vec<f64> = filtered.iter().map(|(rt, _)| *rt).collect();
-
-        // Build chromatograms: clone rts for all but the last, move for the last (saves one alloc)
-        let mut chromatograms = Vec::with_capacity(n_targets);
-        for t in 0..n_targets {
-            let intensity = filtered.iter().map(|(_, ints)| ints[t]).collect();
-            let rt = if t + 1 < n_targets {
-                rts.clone()
-            } else {
-                std::mem::take(&mut rts)
-            };
-            chromatograms.push(Chromatogram { rt, intensity });
-        }
-
-        Ok(chromatograms)
+        self.xic_batch_ms1_impl(targets, None)
     }
 
     /// Like [`scans_parallel`], but increments the progress counter after each scan.
@@ -441,7 +389,7 @@ impl RawFile {
         tolerance_ppm: f64,
         counter: &ProgressCounter,
     ) -> Result<Chromatogram, RawError> {
-        self.xic_inner_with_progress(target_mz, tolerance_ppm, false, counter)
+        self.xic_inner(target_mz, tolerance_ppm, false, Some(counter))
     }
 
     /// Like [`xic_ms1`], but increments the progress counter per scan index entry.
@@ -451,7 +399,7 @@ impl RawFile {
         tolerance_ppm: f64,
         counter: &ProgressCounter,
     ) -> Result<Chromatogram, RawError> {
-        self.xic_inner_with_progress(target_mz, tolerance_ppm, true, counter)
+        self.xic_inner(target_mz, tolerance_ppm, true, Some(counter))
     }
 
     /// Like [`xic_batch_ms1`], but increments the progress counter per scan index entry.
@@ -460,93 +408,16 @@ impl RawFile {
         targets: &[(f64, f64)],
         counter: &ProgressCounter,
     ) -> Result<Vec<Chromatogram>, RawError> {
-        use rayon::prelude::*;
-
-        let ranges: Vec<(f64, f64)> = targets
-            .iter()
-            .map(|&(mz, ppm)| {
-                let half = mz * ppm * 1e-6;
-                (mz - half, mz + half)
-            })
-            .collect();
-        let n_targets = targets.len();
-
-        let per_scan: Vec<Option<(f64, Vec<f64>)>> = self
-            .scan_index
-            .par_iter()
-            .enumerate()
-            .map(|(idx, entry)| {
-                let result = if !self.is_ms1_scan(idx as u32) {
-                    None
-                } else {
-                    let any_overlap = if entry.low_mz > 0.0 && entry.high_mz > 0.0 {
-                        ranges
-                            .iter()
-                            .any(|&(low, high)| entry.high_mz >= low && entry.low_mz <= high)
-                    } else {
-                        true
-                    };
-
-                    if !any_overlap {
-                        Some((entry.rt, vec![0.0; n_targets]))
-                    } else {
-                        let (cmz, cint) = match scan_data::decode_centroids_only(
-                            &self.data,
-                            self.data_addr as usize,
-                            entry,
-                        ) {
-                            Ok(pair) => pair,
-                            Err(_) => {
-                                return {
-                                    progress::tick(counter);
-                                    Some((entry.rt, vec![0.0; n_targets]))
-                                }
-                            }
-                        };
-
-                        let intensities: Vec<f64> = ranges
-                            .iter()
-                            .map(|&(low, high)| {
-                                cmz.iter()
-                                    .zip(cint.iter())
-                                    .filter(|(&mz, _)| mz >= low && mz <= high)
-                                    .map(|(_, &int)| int)
-                                    .sum()
-                            })
-                            .collect();
-
-                        Some((entry.rt, intensities))
-                    }
-                };
-                progress::tick(counter);
-                result
-            })
-            .collect();
-
-        let filtered: Vec<_> = per_scan.into_iter().flatten().collect();
-        let mut rts: Vec<f64> = filtered.iter().map(|(rt, _)| *rt).collect();
-
-        let mut chromatograms = Vec::with_capacity(n_targets);
-        for t in 0..n_targets {
-            let intensity = filtered.iter().map(|(_, ints)| ints[t]).collect();
-            let rt = if t + 1 < n_targets {
-                rts.clone()
-            } else {
-                std::mem::take(&mut rts)
-            };
-            chromatograms.push(Chromatogram { rt, intensity });
-        }
-
-        Ok(chromatograms)
+        self.xic_batch_ms1_impl(targets, Some(counter))
     }
 
-    /// Internal XIC with progress, shared between `xic_with_progress()` and `xic_ms1_with_progress()`.
-    fn xic_inner_with_progress(
+    /// Internal single-target XIC. Optional progress counter for UI feedback.
+    fn xic_inner(
         &self,
         target_mz: f64,
         tolerance_ppm: f64,
         ms1_only: bool,
-        counter: &ProgressCounter,
+        counter: Option<&ProgressCounter>,
     ) -> Result<Chromatogram, RawError> {
         use rayon::prelude::*;
         let half_width = target_mz * tolerance_ppm * 1e-6;
@@ -572,22 +443,13 @@ impl RawFile {
                         entry,
                     ) {
                         Ok(pair) => pair,
-                        Err(_) => {
-                            return {
-                                progress::tick(counter);
-                                Some((entry.rt, 0.0))
-                            }
-                        }
+                        Err(_) => return Some((entry.rt, 0.0)),
                     };
-                    let intensity: f64 = cmz
-                        .iter()
-                        .zip(cint.iter())
-                        .filter(|(&mz, _)| mz >= low && mz <= high)
-                        .map(|(_, &int)| int)
-                        .sum();
-                    Some((entry.rt, intensity))
+                    Some((entry.rt, sum_intensity_in_range(&cmz, &cint, low, high)))
                 };
-                progress::tick(counter);
+                if let Some(c) = counter {
+                    progress::tick(c);
+                }
                 result
             })
             .collect();
@@ -599,58 +461,134 @@ impl RawFile {
         })
     }
 
-    /// Internal XIC implementation shared between `xic()` and `xic_ms1()`.
-    fn xic_inner(
+    /// Internal batch XIC. Optional progress counter for UI feedback.
+    ///
+    /// Uses a flat pre-allocated array (no per-scan Vec), sweep-line for >64 targets,
+    /// and binary search for <=64 targets.
+    fn xic_batch_ms1_impl(
         &self,
-        target_mz: f64,
-        tolerance_ppm: f64,
-        ms1_only: bool,
-    ) -> Result<Chromatogram, RawError> {
+        targets: &[(f64, f64)],
+        counter: Option<&ProgressCounter>,
+    ) -> Result<Vec<Chromatogram>, RawError> {
         use rayon::prelude::*;
-        let half_width = target_mz * tolerance_ppm * 1e-6;
-        let low = target_mz - half_width;
-        let high = target_mz + half_width;
 
-        let results: Vec<Option<(f64, f64)>> = self
-            .scan_index
-            .par_iter()
-            .enumerate()
-            .map(|(idx, entry)| {
-                if ms1_only && !self.is_ms1_scan(idx as u32) {
-                    return None;
-                }
-
-                // Pre-filter: skip scans whose m/z range doesn't overlap the target
-                if entry.low_mz > 0.0
-                    && entry.high_mz > 0.0
-                    && (entry.high_mz < low || entry.low_mz > high)
-                {
-                    return Some((entry.rt, 0.0));
-                }
-
-                let (cmz, cint) = match scan_data::decode_centroids_only(
-                    &self.data,
-                    self.data_addr as usize,
-                    entry,
-                ) {
-                    Ok(pair) => pair,
-                    Err(_) => return Some((entry.rt, 0.0)),
-                };
-                let intensity: f64 = cmz
-                    .iter()
-                    .zip(cint.iter())
-                    .filter(|(&mz, _)| mz >= low && mz <= high)
-                    .map(|(_, &int)| int)
-                    .sum();
-                Some((entry.rt, intensity))
+        let ranges: Vec<(f64, f64)> = targets
+            .iter()
+            .map(|&(mz, ppm)| {
+                let half = mz * ppm * 1e-6;
+                (mz - half, mz + half)
             })
             .collect();
+        let n_targets = targets.len();
 
-        let filtered: Vec<_> = results.into_iter().flatten().collect();
-        Ok(Chromatogram {
-            rt: filtered.iter().map(|(rt, _)| *rt).collect(),
-            intensity: filtered.iter().map(|(_, int)| *int).collect(),
-        })
+        // Pre-sort ranges by low bound for sweep-line extraction
+        let mut sorted_range_indices: Vec<usize> = (0..n_targets).collect();
+        sorted_range_indices.sort_unstable_by(|&a, &b| {
+            ranges[a].0.partial_cmp(&ranges[b].0).unwrap()
+        });
+
+        // Collect MS1 scan indices first to know the output size
+        let ms1_indices: Vec<(usize, &ScanIndexEntry)> = self
+            .scan_index
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| self.is_ms1_scan(*idx as u32))
+            .collect();
+        let n_ms1 = ms1_indices.len();
+
+        // Flat output: data[scan * n_targets + target] -- no per-scan Vec allocation
+        let mut flat_data = vec![0.0f64; n_ms1 * n_targets];
+        let mut rts = vec![0.0f64; n_ms1];
+
+        // Split into per-scan rows for parallel write (non-overlapping)
+        let rows: Vec<(&ScanIndexEntry, &mut [f64], &mut f64)> = ms1_indices
+            .iter()
+            .zip(flat_data.chunks_exact_mut(n_targets))
+            .zip(rts.iter_mut())
+            .map(|(((_idx, entry), row), rt)| (*entry, row, rt))
+            .collect();
+
+        rows.into_par_iter().for_each(|(entry, row, rt_out)| {
+            *rt_out = entry.rt;
+
+            // Check if any target overlaps this scan's m/z range
+            if entry.low_mz > 0.0 && entry.high_mz > 0.0 {
+                let any_overlap = ranges
+                    .iter()
+                    .any(|&(low, high)| entry.high_mz >= low && entry.low_mz <= high);
+                if !any_overlap {
+                    if let Some(c) = counter {
+                        progress::tick(c);
+                    }
+                    return;
+                }
+            }
+
+            let (cmz, cint) = match scan_data::decode_centroids_only(
+                &self.data,
+                self.data_addr as usize,
+                entry,
+            ) {
+                Ok(pair) => pair,
+                Err(_) => {
+                    if let Some(c) = counter {
+                        progress::tick(c);
+                    }
+                    return;
+                }
+            };
+
+            if !cmz.is_empty() {
+                if n_targets > 64 {
+                    // Sweep-line: O(centroids + targets)
+                    let n_peaks = cmz.len();
+                    let mut peak_idx = 0;
+                    for &ti in &sorted_range_indices {
+                        let (low, high) = ranges[ti];
+                        while peak_idx < n_peaks && cmz[peak_idx] < low {
+                            peak_idx += 1;
+                        }
+                        let mut sum = 0.0;
+                        let mut j = peak_idx;
+                        while j < n_peaks && cmz[j] <= high {
+                            sum += cint[j];
+                            j += 1;
+                        }
+                        row[ti] = sum;
+                    }
+                } else {
+                    // Binary search per target: O(targets * log(centroids))
+                    for (ti, &(low, high)) in ranges.iter().enumerate() {
+                        row[ti] = sum_intensity_in_range(&cmz, &cint, low, high);
+                    }
+                }
+            }
+            if let Some(c) = counter {
+                progress::tick(c);
+            }
+        });
+
+        // Advance progress for skipped MS2 scans
+        if let Some(c) = counter {
+            let ms2_count = self.scan_index.len() - n_ms1;
+            for _ in 0..ms2_count {
+                progress::tick(c);
+            }
+        }
+
+        // Transpose flat_data into Vec<Chromatogram>
+        let mut chromatograms = Vec::with_capacity(n_targets);
+        for t in 0..n_targets {
+            let intensity: Vec<f64> = (0..n_ms1).map(|s| flat_data[s * n_targets + t]).collect();
+            let rt = if t + 1 < n_targets {
+                rts.clone()
+            } else {
+                std::mem::take(&mut rts)
+            };
+            chromatograms.push(Chromatogram { rt, intensity });
+        }
+
+        Ok(chromatograms)
     }
 
     /// Fast MS1 check using trailer metadata (no scan data decoding).
@@ -1026,12 +964,7 @@ impl RawFile {
                     Ok(pair) => pair,
                     Err(_) => return Some((entry.rt, 0.0)),
                 };
-                let intensity: f64 = cmz
-                    .iter()
-                    .zip(cint.iter())
-                    .filter(|(&mz, _)| mz >= low && mz <= high)
-                    .map(|(_, &int)| int)
-                    .sum();
+                let intensity = sum_intensity_in_range(&cmz, &cint, low, high);
                 Some((entry.rt, intensity))
             })
             .collect();

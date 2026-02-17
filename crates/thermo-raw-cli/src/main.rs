@@ -665,43 +665,95 @@ fn main() -> anyhow::Result<()> {
             let mode = if mmap { "mmap" } else { "read" };
 
             if xic {
-                // XIC benchmark: internally timed to exclude process startup
-                let targets = [
-                    524.2648, 445.12, 300.15, 600.33, 750.42, 200.10, 888.55, 1100.78, 350.22,
-                    500.00,
-                ];
+                // File info
+                let n_scans = raw.n_scans();
+                let first = raw.first_scan();
+                let last = raw.last_scan();
+                let ms1_count = (0..n_scans)
+                    .filter(|&i| raw.is_ms1_scan(i))
+                    .count();
+                println!(
+                    "File: {} scans ({} MS1, {} MS2+), range {}..{}",
+                    n_scans,
+                    ms1_count,
+                    n_scans as usize - ms1_count,
+                    first,
+                    last
+                );
+
                 let ppm = 5.0;
 
-                // Single target XIC
+                // Generate 2000 evenly-spaced m/z targets across typical metabolomics range
+                let n_targets = 2000;
+                let mz_start = 70.0;
+                let mz_end = 1050.0;
+                let step = (mz_end - mz_start) / n_targets as f64;
+                let targets_2000: Vec<(f64, f64)> = (0..n_targets)
+                    .map(|i| (mz_start + i as f64 * step, ppm))
+                    .collect();
+
+                // Warmup run (populates caches)
+                let _ = raw.xic_ms1(targets_2000[0].0, ppm)?;
+
+                // --- Single target XIC ---
                 let start = std::time::Instant::now();
-                let chrom = raw.xic_ms1(targets[0], ppm)?;
-                let elapsed = start.elapsed();
+                let chrom = raw.xic_ms1(targets_2000[0].0, ppm)?;
+                let t_single = start.elapsed();
                 println!(
-                    "XIC MS1 single: {:.1}ms ({} points)",
-                    elapsed.as_secs_f64() * 1000.0,
+                    "XIC MS1 single:      {:>8.1}ms  ({} points)",
+                    t_single.as_secs_f64() * 1000.0,
                     chrom.rt.len()
                 );
 
-                // 3-target batch XIC
-                let batch3: Vec<(f64, f64)> = targets[..3].iter().map(|&mz| (mz, ppm)).collect();
+                // --- 10-target batch XIC ---
                 let start = std::time::Instant::now();
-                let chroms = raw.xic_batch_ms1(&batch3)?;
-                let elapsed = start.elapsed();
+                let chroms = raw.xic_batch_ms1(&targets_2000[..10])?;
+                let t_10 = start.elapsed();
                 println!(
-                    "XIC MS1 batch 3: {:.1}ms ({} chroms)",
-                    elapsed.as_secs_f64() * 1000.0,
+                    "XIC MS1 batch 10:    {:>8.1}ms  ({} chroms)",
+                    t_10.as_secs_f64() * 1000.0,
                     chroms.len()
                 );
 
-                // 10-target batch XIC
-                let batch10: Vec<(f64, f64)> = targets.iter().map(|&mz| (mz, ppm)).collect();
+                // --- 100-target batch XIC ---
                 let start = std::time::Instant::now();
-                let chroms = raw.xic_batch_ms1(&batch10)?;
-                let elapsed = start.elapsed();
+                let chroms = raw.xic_batch_ms1(&targets_2000[..100])?;
+                let t_100 = start.elapsed();
                 println!(
-                    "XIC MS1 batch 10: {:.1}ms ({} chroms)",
-                    elapsed.as_secs_f64() * 1000.0,
+                    "XIC MS1 batch 100:   {:>8.1}ms  ({} chroms)",
+                    t_100.as_secs_f64() * 1000.0,
                     chroms.len()
+                );
+
+                // --- 500-target batch XIC ---
+                let start = std::time::Instant::now();
+                let chroms = raw.xic_batch_ms1(&targets_2000[..500])?;
+                let t_500 = start.elapsed();
+                println!(
+                    "XIC MS1 batch 500:   {:>8.1}ms  ({} chroms)",
+                    t_500.as_secs_f64() * 1000.0,
+                    chroms.len()
+                );
+
+                // --- 2000-target batch XIC ---
+                let start = std::time::Instant::now();
+                let chroms = raw.xic_batch_ms1(&targets_2000)?;
+                let t_2000 = start.elapsed();
+                println!(
+                    "XIC MS1 batch 2000:  {:>8.1}ms  ({} chroms)",
+                    t_2000.as_secs_f64() * 1000.0,
+                    chroms.len()
+                );
+
+                // Summary
+                println!("\n--- Summary ---");
+                println!(
+                    "Per-target cost (batch 2000): {:.2}ms/target",
+                    t_2000.as_secs_f64() * 1000.0 / 2000.0
+                );
+                println!(
+                    "Throughput (batch 2000): {:.0} targets/sec",
+                    2000.0 / t_2000.as_secs_f64()
                 );
             } else {
                 let start = std::time::Instant::now();
