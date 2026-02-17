@@ -593,8 +593,48 @@ impl From<&::thermo_raw::Ms2ScanInfo> for PyMs2ScanInfo {
 ///         tensor: numpy array of shape (n_samples, n_targets, n_timepoints)
 ///         rt_grid: numpy array of RT values
 ///         sample_names: list of file stem strings
+/// Spawn a background thread that polls the atomic counter and calls a Python callback.
+///
+/// Similar to `spawn_tqdm_updater` but invokes an arbitrary Python callable
+/// with the delta count instead of updating a tqdm bar.
+fn spawn_callback_updater(
+    py: Python<'_>,
+    counter: &ProgressCounter,
+    callback: PyObject,
+) -> (Arc<AtomicBool>, std::thread::JoinHandle<()>) {
+    let done = Arc::new(AtomicBool::new(false));
+    let done_clone = Arc::clone(&done);
+    let counter_clone = Arc::clone(counter);
+    let callback_clone = callback.clone_ref(py);
+
+    let handle = std::thread::spawn(move || {
+        let mut last = 0u64;
+        while !done_clone.load(Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let current = counter_clone.load(Ordering::Relaxed);
+            if current > last {
+                let delta = current - last;
+                last = current;
+                Python::with_gil(|py| {
+                    let _ = callback_clone.call1(py, (delta,));
+                });
+            }
+        }
+        // Final flush
+        let current = counter_clone.load(Ordering::Relaxed);
+        if current > last {
+            let delta = current - last;
+            Python::with_gil(|py| {
+                let _ = callback_clone.call1(py, (delta,));
+            });
+        }
+    });
+
+    (done, handle)
+}
+
 #[pyfunction]
-#[pyo3(signature = (file_paths, targets, rt_range=None, rt_resolution=0.01, progress=false))]
+#[pyo3(signature = (file_paths, targets, rt_range=None, rt_resolution=0.01, progress=false, progress_callback=None))]
 fn batch_xic<'py>(
     py: Python<'py>,
     file_paths: Vec<String>,
@@ -602,6 +642,7 @@ fn batch_xic<'py>(
     rt_range: Option<(f64, f64)>,
     rt_resolution: f64,
     progress: bool,
+    progress_callback: Option<PyObject>,
 ) -> PyResult<(
     Bound<'py, PyArray3<f64>>,
     Bound<'py, PyArray1<f64>>,
@@ -609,7 +650,25 @@ fn batch_xic<'py>(
 )> {
     let paths: Vec<&Path> = file_paths.iter().map(|s| Path::new(s.as_str())).collect();
 
-    let result = if progress {
+    let result = if let Some(callback) = progress_callback {
+        // Use the Python callback for progress (preferred for embedding in apps)
+        let counter = ::thermo_raw::new_counter();
+        let (done, handle) = spawn_callback_updater(py, &counter, callback);
+        let r = py.allow_threads(|| {
+            ::thermo_raw::batch_xic_ms1_with_progress(
+                &paths,
+                &targets,
+                rt_range,
+                rt_resolution,
+                &counter,
+            )
+        });
+        done.store(true, Ordering::Relaxed);
+        // Release GIL before joining to avoid deadlock: the updater thread's
+        // final flush needs the GIL to call the Python callback.
+        py.allow_threads(|| handle.join().unwrap());
+        r
+    } else if progress {
         let total = file_paths.len() as u64;
         let counter = ::thermo_raw::new_counter();
         let bar = try_create_tqdm(py, total, "Batch XIC");
@@ -625,11 +684,14 @@ fn batch_xic<'py>(
         });
         if let Some((done, handle)) = updater {
             done.store(true, Ordering::Relaxed);
-            handle.join().unwrap();
+            // Release GIL before joining to avoid deadlock with final flush.
+            py.allow_threads(|| handle.join().unwrap());
         }
         r
     } else {
-        ::thermo_raw::batch_xic_ms1(&paths, &targets, rt_range, rt_resolution)
+        py.allow_threads(|| {
+            ::thermo_raw::batch_xic_ms1(&paths, &targets, rt_range, rt_resolution)
+        })
     }
     .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
 

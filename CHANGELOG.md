@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.4.3
+
+### Changed
+
+- Python wheels now use abi3 (stable ABI): one wheel per platform instead of one per Python version
+- Drop Python 3.9/3.10 support; requires Python 3.11+
+- Release builds reduced from 25 wheels to 5
+
 ## v0.3.0
 
 ### Added
