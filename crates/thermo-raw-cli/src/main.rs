@@ -290,7 +290,7 @@ fn main() -> anyhow::Result<()> {
             ms1_only,
             output,
         } => {
-            let raw = RawFile::open_mmap(&file)?;
+            let raw = RawFile::open(&file)?;
             let mut writer: Box<dyn std::io::Write> = if let Some(path) = output {
                 Box::new(std::fs::File::create(path)?)
             } else {
@@ -520,6 +520,42 @@ fn main() -> anyhow::Result<()> {
                 }
             });
 
+            // For single-file, use direct XIC (no batch wrapper overhead)
+            if files.len() == 1 {
+                let raw = thermo_raw::RawFile::open(&files[0])?;
+                let chroms = raw.xic_batch_ms1(&targets)?;
+
+                let mut writer: Box<dyn std::io::Write> = if let Some(path) = output {
+                    Box::new(std::fs::File::create(path)?)
+                } else {
+                    Box::new(std::io::stdout())
+                };
+
+                let sample_name = files[0]
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+
+                // CSV header
+                let mut header = vec!["rt".to_string()];
+                for m in &mz {
+                    header.push(format!("{}_{:.4}", sample_name, m));
+                }
+                writeln!(writer, "{}", header.join(","))?;
+
+                // Data rows (native RT points, no interpolation)
+                let n_points = chroms[0].rt.len();
+                for i in 0..n_points {
+                    write!(writer, "{:.6}", chroms[0].rt[i])?;
+                    for chrom in &chroms {
+                        let val = chrom.intensity[i] + 0.0; // normalize -0.0
+                        write!(writer, ",{:.2}", val)?;
+                    }
+                    writeln!(writer)?;
+                }
+
+            } else {
+
             let n_files = files.len() as u64;
             let (counter, done, handle) = spawn_progress_bar(n_files, "Batch XIC");
             let start = std::time::Instant::now();
@@ -568,6 +604,7 @@ fn main() -> anyhow::Result<()> {
                 }
                 writeln!(writer)?;
             }
+            } // else (multi-file)
         }
 
         Commands::Convert {

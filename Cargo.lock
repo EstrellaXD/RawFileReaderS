@@ -104,7 +104,7 @@ dependencies = [
 
 [[package]]
 name = "cfb-reader"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "cfb",
 ]
@@ -512,7 +512,7 @@ dependencies = [
 
 [[package]]
 name = "thermo-raw"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "byteorder",
  "cfb-reader",
@@ -525,7 +525,7 @@ dependencies = [
 
 [[package]]
 name = "thermo-raw-cli"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "cfb-reader",
@@ -538,7 +538,7 @@ dependencies = [
 
 [[package]]
 name = "thermo-raw-mzml"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "base64",
  "flate2",

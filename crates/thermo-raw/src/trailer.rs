@@ -266,19 +266,28 @@ pub fn find_generic_data_header(
     let search_end = spect_pos as usize;
 
     // Try 4-byte aligned steps first (the u32 n_fields count is almost certainly aligned).
-    // This reduces iterations from ~20K to ~5K for the common case.
-    let aligned_start = (search_start + 3) & !3; // round up to next 4-byte boundary
+    let aligned_start = (search_start + 3) & !3;
     let mut pos = aligned_start;
-    while pos + 4 <= search_end {
+    while pos + 12 <= search_end {
         let n_fields = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
         if (10..=300).contains(&n_fields) {
-            if let Ok(header) = parse_generic_data_header(data, pos as u64) {
-                let all_valid = header
-                    .descriptors
-                    .iter()
-                    .all(|d| VALID_V66_TYPE_CODES.contains(&d.type_code));
-                if all_valid && header.descriptors.len() >= 5 {
-                    return Ok(header);
+            // Cheap pre-check: peek at the first descriptor's type_code (offset +4)
+            // and first label's PascalString length prefix (offset +12).
+            // This avoids expensive full parse on garbage data.
+            let first_type = u32::from_le_bytes(data[pos + 4..pos + 8].try_into().unwrap());
+            if VALID_V66_TYPE_CODES.contains(&first_type) {
+                let first_label_len =
+                    u32::from_le_bytes(data[pos + 12..pos + 16].try_into().unwrap());
+                if first_label_len <= 200 {
+                    if let Ok(header) = parse_generic_data_header(data, pos as u64) {
+                        let all_valid = header
+                            .descriptors
+                            .iter()
+                            .all(|d| VALID_V66_TYPE_CODES.contains(&d.type_code));
+                        if all_valid && header.descriptors.len() >= 5 {
+                            return Ok(header);
+                        }
+                    }
                 }
             }
         }
@@ -287,21 +296,27 @@ pub fn find_generic_data_header(
 
     // Fallback: 1-byte steps for unaligned cases.
     pos = search_start;
-    while pos + 4 <= search_end {
-        // Skip positions already checked in aligned pass
+    while pos + 16 <= search_end {
         if pos >= aligned_start && (pos - aligned_start).is_multiple_of(4) {
             pos += 1;
             continue;
         }
         let n_fields = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
         if (10..=300).contains(&n_fields) {
-            if let Ok(header) = parse_generic_data_header(data, pos as u64) {
-                let all_valid = header
-                    .descriptors
-                    .iter()
-                    .all(|d| VALID_V66_TYPE_CODES.contains(&d.type_code));
-                if all_valid && header.descriptors.len() >= 5 {
-                    return Ok(header);
+            let first_type = u32::from_le_bytes(data[pos + 4..pos + 8].try_into().unwrap());
+            if VALID_V66_TYPE_CODES.contains(&first_type) {
+                let first_label_len =
+                    u32::from_le_bytes(data[pos + 12..pos + 16].try_into().unwrap());
+                if first_label_len <= 200 {
+                    if let Ok(header) = parse_generic_data_header(data, pos as u64) {
+                        let all_valid = header
+                            .descriptors
+                            .iter()
+                            .all(|d| VALID_V66_TYPE_CODES.contains(&d.type_code));
+                        if all_valid && header.descriptors.len() >= 5 {
+                            return Ok(header);
+                        }
+                    }
                 }
             }
         }

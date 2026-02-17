@@ -458,8 +458,8 @@ mod tests {
     fn test_skip_pascal_string_with_long_string() {
         // PascalStringWin32: length=100 (200 bytes of string data)
         let mut data: Vec<u8> = vec![0x64, 0x00, 0x00, 0x00]; // length: 100
-        data.extend(vec![0x41, 0x00].repeat(100)); // 'A' repeated 100 times in UTF-16LE
-        data.extend(vec![0xFF, 0x00, 0x00, 0x00]); // trailing u32: 255
+        data.extend([0x41, 0x00].repeat(100)); // 'A' repeated 100 times in UTF-16LE
+        data.extend([0xFF, 0x00, 0x00, 0x00]); // trailing u32: 255
 
         let mut reader = BinaryReader::new(&data);
         reader.skip_pascal_string().unwrap();

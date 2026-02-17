@@ -55,3 +55,109 @@ pub fn decode_centroid(data: &[u8], offset: usize) -> Result<(Vec<f64>, Vec<f64>
 
     Ok((mz_values, intensities))
 }
+
+/// Sum centroid intensities within [mz_low, mz_high] from legacy packet centroid bytes.
+///
+/// Zero allocations: reads raw bytes in-place, accumulates a running sum.
+/// Legacy centroids use f32 mz + f32 intensity (8 bytes/peak) and are sorted by m/z.
+pub fn sum_centroids_in_range(
+    data: &[u8],
+    offset: usize,
+    mz_low: f64,
+    mz_high: f64,
+) -> Result<f64, RawError> {
+    let mut reader = BinaryReader::at_offset(data, offset as u64);
+    let count = reader.read_u32()?;
+
+    if count > 10_000_000 {
+        return Err(RawError::ScanDecodeError {
+            offset,
+            reason: format!("centroid data has unreasonable peak count: {}", count),
+        });
+    }
+
+    if count == 0 {
+        return Ok(0.0);
+    }
+
+    let total_bytes = count as usize * 8;
+    let raw_slice = reader.slice(total_bytes)?;
+    let mut sum = 0.0f64;
+
+    for i in 0..count as usize {
+        let base = i * 8;
+        let mz = f32::from_le_bytes(raw_slice[base..base + 4].try_into().unwrap()) as f64;
+        if mz > mz_high {
+            break;
+        }
+        if mz >= mz_low {
+            let intensity = f32::from_le_bytes(raw_slice[base + 4..base + 8].try_into().unwrap());
+            sum += intensity as f64;
+        }
+    }
+
+    Ok(sum)
+}
+
+/// Sum centroid intensities for multiple m/z ranges in a single pass over legacy centroid data.
+///
+/// `ranges` must be sorted by low bound. `out` must have length >= ranges.len().
+/// Zero allocations beyond the caller-provided output slice.
+pub fn sum_centroids_multi_target(
+    data: &[u8],
+    offset: usize,
+    ranges: &[(f64, f64)],
+    out: &mut [f64],
+) -> Result<(), RawError> {
+    let mut reader = BinaryReader::at_offset(data, offset as u64);
+    let count = reader.read_u32()?;
+
+    // Initialize output to zero
+    for v in out.iter_mut().take(ranges.len()) {
+        *v = 0.0;
+    }
+
+    if count > 10_000_000 {
+        return Err(RawError::ScanDecodeError {
+            offset,
+            reason: format!("centroid data has unreasonable peak count: {}", count),
+        });
+    }
+
+    if count == 0 {
+        return Ok(());
+    }
+
+    let total_bytes = count as usize * 8;
+    let raw_slice = reader.slice(total_bytes)?;
+    let n_ranges = ranges.len();
+    let mut range_start = 0usize;
+
+    for i in 0..count as usize {
+        let base = i * 8;
+        let mz = f32::from_le_bytes(raw_slice[base..base + 4].try_into().unwrap()) as f64;
+        let intensity =
+            f32::from_le_bytes(raw_slice[base + 4..base + 8].try_into().unwrap()) as f64;
+
+        // Advance range_start past ranges whose high < mz
+        while range_start < n_ranges && ranges[range_start].1 < mz {
+            range_start += 1;
+        }
+
+        if range_start >= n_ranges {
+            break;
+        }
+
+        for r in range_start..n_ranges {
+            let (low, high) = ranges[r];
+            if low > mz {
+                break;
+            }
+            if mz <= high {
+                out[r] += intensity;
+            }
+        }
+    }
+
+    Ok(())
+}

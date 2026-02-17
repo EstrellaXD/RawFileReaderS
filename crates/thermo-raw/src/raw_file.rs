@@ -23,28 +23,6 @@ use std::ops::Deref;
 use std::path::Path;
 use std::sync::OnceLock;
 
-/// Sum intensities where m/z falls within [low, high], using binary search.
-///
-/// Centroid m/z arrays are sorted in ascending order. Binary search finds the
-/// first index >= low in O(log n), then walks forward only until > high.
-/// This matches Thermo's `FastBinarySearch` + linear walk approach.
-#[inline]
-fn sum_intensity_in_range(mz: &[f64], intensity: &[f64], low: f64, high: f64) -> f64 {
-    if mz.is_empty() {
-        return 0.0;
-    }
-    // Binary search: find first index where mz[i] >= low
-    let start = mz.partition_point(|&v| v < low);
-    let mut sum = 0.0;
-    let len = mz.len();
-    let mut i = start;
-    while i < len && mz[i] <= high {
-        sum += intensity[i];
-        i += 1;
-    }
-    sum
-}
-
 /// Diagnostic information for debugging address resolution.
 pub struct DebugInfo {
     pub file_size: u64,
@@ -142,9 +120,11 @@ impl RawFile {
         }
 
         let info_base = finnigan_offset as u64 + FileHeader::size() as u64;
-        let raw_file_info = find_raw_file_info_sequential(&data, info_base, ver)
-            .or_else(|_| find_raw_file_info(&data, info_base, ver))
-            .map_err(|e| parse_error("RawFileInfo", info_base, Some(ver), e))?;
+        let raw_file_info = match find_raw_file_info_sequential(&data, info_base, ver) {
+            Ok(info) => info,
+            Err(_) => find_raw_file_info(&data, info_base, ver)
+                .map_err(|e| parse_error("RawFileInfo", info_base, Some(ver), e))?,
+        };
 
         let rh_addr = raw_file_info.run_header_addr();
         if rh_addr == 0 {
@@ -160,13 +140,10 @@ impl RawFile {
         let scan_index_entries = scan_index::parse_scan_index(&data, si_addr, ver, n_scans)
             .map_err(|e| parse_error("ScanIndex", si_addr, Some(ver), e))?;
 
-        // DataOffset (both 32-bit and 64-bit) is relative to PacketPos (the data stream base).
-        // Absolute scan data offset = PacketPos + DataOffset.
         let data_addr = run_header.data_addr();
         let spect_pos = run_header.scan_index_addr();
         let trailer_extra_pos = run_header.scan_params_addr();
 
-        // Build metadata
         let file_metadata = metadata::build_metadata(&file_header, &raw_file_info, &run_header);
 
         // Eagerly parse trailer layout (header only, not all records).
@@ -180,7 +157,6 @@ impl RawFile {
                 .map(TrailerLayout::from_header)
                 .ok()
                 .or_else(|| {
-                    // Fallback: try legacy approach (GDH at scan_trailer_addr)
                     let trailer_addr = run_header.scan_trailer_addr();
                     if trailer_addr > 0 {
                         trailer::parse_generic_data_header(&data, trailer_addr)
@@ -412,6 +388,9 @@ impl RawFile {
     }
 
     /// Internal single-target XIC. Optional progress counter for UI feedback.
+    ///
+    /// Uses zero-allocation centroid extraction: reads raw bytes in-place,
+    /// summing intensities without allocating Vec per scan.
     fn xic_inner(
         &self,
         target_mz: f64,
@@ -437,15 +416,15 @@ impl RawFile {
                 {
                     Some((entry.rt, 0.0))
                 } else {
-                    let (cmz, cint) = match scan_data::decode_centroids_only(
+                    let intensity = scan_data::sum_centroids_in_mz_range(
                         &self.data,
                         self.data_addr as usize,
                         entry,
-                    ) {
-                        Ok(pair) => pair,
-                        Err(_) => return Some((entry.rt, 0.0)),
-                    };
-                    Some((entry.rt, sum_intensity_in_range(&cmz, &cint, low, high)))
+                        low,
+                        high,
+                    )
+                    .unwrap_or(0.0);
+                    Some((entry.rt, intensity))
                 };
                 if let Some(c) = counter {
                     progress::tick(c);
@@ -463,8 +442,9 @@ impl RawFile {
 
     /// Internal batch XIC. Optional progress counter for UI feedback.
     ///
-    /// Uses a flat pre-allocated array (no per-scan Vec), sweep-line for >64 targets,
-    /// and binary search for <=64 targets.
+    /// Zero-allocation extraction: reads raw scan bytes in-place, summing
+    /// intensities for all targets in a single pass per scan.
+    /// Returns native scan-level RT points (one per MS1 scan, no interpolation).
     fn xic_batch_ms1_impl(
         &self,
         targets: &[(f64, f64)],
@@ -472,6 +452,9 @@ impl RawFile {
     ) -> Result<Vec<Chromatogram>, RawError> {
         use rayon::prelude::*;
 
+        let n_targets = targets.len();
+
+        // Compute m/z ranges and build a sorted version for sweep-line extraction
         let ranges: Vec<(f64, f64)> = targets
             .iter()
             .map(|&(mz, ppm)| {
@@ -479,15 +462,21 @@ impl RawFile {
                 (mz - half, mz + half)
             })
             .collect();
-        let n_targets = targets.len();
 
-        // Pre-sort ranges by low bound for sweep-line extraction
-        let mut sorted_range_indices: Vec<usize> = (0..n_targets).collect();
-        sorted_range_indices.sort_unstable_by(|&a, &b| {
+        // Sort ranges by low bound for the multi-target sweep
+        let mut sorted_indices: Vec<usize> = (0..n_targets).collect();
+        sorted_indices.sort_unstable_by(|&a, &b| {
             ranges[a].0.partial_cmp(&ranges[b].0).unwrap()
         });
+        let sorted_ranges: Vec<(f64, f64)> = sorted_indices.iter().map(|&i| ranges[i]).collect();
 
-        // Collect MS1 scan indices first to know the output size
+        // Map from sorted position back to original target index
+        let mut unsort_map = vec![0usize; n_targets];
+        for (sorted_pos, &orig_idx) in sorted_indices.iter().enumerate() {
+            unsort_map[orig_idx] = sorted_pos;
+        }
+
+        // Collect MS1 scan indices
         let ms1_indices: Vec<(usize, &ScanIndexEntry)> = self
             .scan_index
             .iter()
@@ -496,7 +485,7 @@ impl RawFile {
             .collect();
         let n_ms1 = ms1_indices.len();
 
-        // Flat output: data[scan * n_targets + target] -- no per-scan Vec allocation
+        // Flat output: data[scan * n_targets + target] (sorted target order)
         let mut flat_data = vec![0.0f64; n_ms1 * n_targets];
         let mut rts = vec![0.0f64; n_ms1];
 
@@ -511,12 +500,15 @@ impl RawFile {
         rows.into_par_iter().for_each(|(entry, row, rt_out)| {
             *rt_out = entry.rt;
 
-            // Check if any target overlaps this scan's m/z range
+            // Quick check: skip scan if no target overlaps its m/z range
             if entry.low_mz > 0.0 && entry.high_mz > 0.0 {
                 let any_overlap = ranges
                     .iter()
                     .any(|&(low, high)| entry.high_mz >= low && entry.low_mz <= high);
                 if !any_overlap {
+                    for v in row.iter_mut() {
+                        *v = 0.0;
+                    }
                     if let Some(c) = counter {
                         progress::tick(c);
                     }
@@ -524,45 +516,15 @@ impl RawFile {
                 }
             }
 
-            let (cmz, cint) = match scan_data::decode_centroids_only(
+            // Zero-alloc multi-target extraction directly from raw scan bytes
+            let _ = scan_data::sum_centroids_multi_target(
                 &self.data,
                 self.data_addr as usize,
                 entry,
-            ) {
-                Ok(pair) => pair,
-                Err(_) => {
-                    if let Some(c) = counter {
-                        progress::tick(c);
-                    }
-                    return;
-                }
-            };
+                &sorted_ranges,
+                row,
+            );
 
-            if !cmz.is_empty() {
-                if n_targets > 64 {
-                    // Sweep-line: O(centroids + targets)
-                    let n_peaks = cmz.len();
-                    let mut peak_idx = 0;
-                    for &ti in &sorted_range_indices {
-                        let (low, high) = ranges[ti];
-                        while peak_idx < n_peaks && cmz[peak_idx] < low {
-                            peak_idx += 1;
-                        }
-                        let mut sum = 0.0;
-                        let mut j = peak_idx;
-                        while j < n_peaks && cmz[j] <= high {
-                            sum += cint[j];
-                            j += 1;
-                        }
-                        row[ti] = sum;
-                    }
-                } else {
-                    // Binary search per target: O(targets * log(centroids))
-                    for (ti, &(low, high)) in ranges.iter().enumerate() {
-                        row[ti] = sum_intensity_in_range(&cmz, &cint, low, high);
-                    }
-                }
-            }
             if let Some(c) = counter {
                 progress::tick(c);
             }
@@ -576,10 +538,11 @@ impl RawFile {
             }
         }
 
-        // Transpose flat_data into Vec<Chromatogram>
+        // Transpose flat_data (sorted target order) into Vec<Chromatogram> (original order)
         let mut chromatograms = Vec::with_capacity(n_targets);
-        for t in 0..n_targets {
-            let intensity: Vec<f64> = (0..n_ms1).map(|s| flat_data[s * n_targets + t]).collect();
+        for (t, &sorted_pos) in unsort_map.iter().enumerate() {
+            let intensity: Vec<f64> =
+                (0..n_ms1).map(|s| flat_data[s * n_targets + sorted_pos]).collect();
             let rt = if t + 1 < n_targets {
                 rts.clone()
             } else {
@@ -925,6 +888,7 @@ impl RawFile {
     /// XIC within a specific DIA isolation window.
     ///
     /// Only decodes scans matching the window, using rayon for parallelism.
+    /// Uses zero-allocation centroid extraction.
     pub fn xic_ms2_window(
         &self,
         target_mz: f64,
@@ -956,15 +920,14 @@ impl RawFile {
                     return Some((entry.rt, 0.0));
                 }
 
-                let (cmz, cint) = match scan_data::decode_centroids_only(
+                let intensity = scan_data::sum_centroids_in_mz_range(
                     &self.data,
                     self.data_addr as usize,
                     entry,
-                ) {
-                    Ok(pair) => pair,
-                    Err(_) => return Some((entry.rt, 0.0)),
-                };
-                let intensity = sum_intensity_in_range(&cmz, &cint, low, high);
+                    low,
+                    high,
+                )
+                .unwrap_or(0.0);
                 Some((entry.rt, intensity))
             })
             .collect();
@@ -1395,7 +1358,7 @@ pub fn diagnose(data: &[u8]) -> DiagnosticReport {
     if trailer_extra_pos > 0 && spect_pos > 0 {
         let layout = trailer::find_generic_data_header(data, spect_pos)
             .map(|h| h.with_records_offset(trailer_extra_pos))
-            .and_then(|h| Ok(TrailerLayout::from_header(h)))
+            .map(TrailerLayout::from_header)
             .or_else(|_| {
                 let addr = run_header.scan_trailer_addr();
                 if addr > 0 {
@@ -1483,21 +1446,37 @@ fn find_raw_file_info_sequential(
     version: u32,
 ) -> Result<RawFileInfo, RawError> {
     let mut reader = BinaryReader::at_offset(data, info_base);
-
     skip_sequence_row(&mut reader, version)?;
-    skip_auto_sampler_config(&mut reader, version)?;
 
-    let rfi_offset = reader.position();
-    let info = RawFileInfo::parse(data, rfi_offset, version)?;
     let file_size = data.len() as u64;
-    if info.has_valid_controllers(file_size) {
-        Ok(info)
-    } else {
-        Err(RawError::CorruptedData(format!(
-            "Sequential reading: RawFileInfo at offset {} has no valid controllers",
-            rfi_offset
-        )))
+
+    // v66+ files may have extra PascalStrings (e.g., SampleExtensionInfo JSON)
+    // after the standard SequenceRow fields. Probe forward one PascalString at
+    // a time, trying AutoSamplerConfig + RawFileInfo at each boundary.
+    for _ in 0..100 {
+        let saved_pos = reader.position();
+
+        // Try: skip AutoSamplerConfig, parse RawFileInfo, validate
+        let mut probe = BinaryReader::at_offset(data, saved_pos);
+        if skip_auto_sampler_config(&mut probe, version).is_ok() {
+            let rfi_offset = probe.position();
+            if let Ok(info) = RawFileInfo::parse(data, rfi_offset, version) {
+                if info.has_valid_controllers(file_size) {
+                    return Ok(info);
+                }
+            }
+        }
+
+        // Not found — skip one PascalString (extra SequenceRow data) and retry
+        reader = BinaryReader::at_offset(data, saved_pos);
+        if reader.skip_pascal_string().is_err() {
+            break;
+        }
     }
+
+    Err(RawError::CorruptedData(
+        "Sequential reading: no valid RawFileInfo found after SequenceRow".to_string(),
+    ))
 }
 
 /// Skip past the SequenceRow structure (variable-length).
@@ -1569,31 +1548,52 @@ fn skip_auto_sampler_config(reader: &mut BinaryReader, version: u32) -> Result<(
     Ok(())
 }
 
-/// Search for a valid RawFileInfo by scanning forward from the given offset.
+/// Search for a valid RawFileInfo by scanning for the preamble date signature.
 ///
-/// In v66+ files, .NET serialized metadata blobs (SequencerRow, AutoSamplerInfo)
-/// sit between the FileHeader and RawFileInfo. This function scans forward in
-/// 2-byte steps, attempting to parse RawFileInfo at each candidate offset and
-/// validating the result by checking both VCI entries and RunHeader reachability.
+/// The RawFileInfo preamble starts with IsExpMethodPresent (i32, 0 or 1),
+/// then SystemTimeStruct with year (2000-2100), month (1-12), day (1-31).
+/// This distinctive byte pattern allows fast scanning through large gaps (e.g.,
+/// v66 files with multi-MB SequenceRow JSON blobs) without expensive parsing
+/// at every candidate offset.
 fn find_raw_file_info(data: &[u8], start: u64, version: u32) -> Result<RawFileInfo, RawError> {
     let file_size = data.len() as u64;
-    // Search up to 16KB past the FileHeader (more than enough for any blob)
-    let search_limit = (start + 16384).min(file_size);
+    // Search up to 8MB past start (handles large SequenceRow JSON blobs in v66+).
+    let search_limit = (start + 8 * 1024 * 1024).min(file_size.saturating_sub(2048)) as usize;
+    let start = start as usize;
 
-    let mut offset = start;
-    while offset < search_limit {
-        if let Ok(info) = RawFileInfo::parse(data, offset, version) {
-            if info.has_valid_controllers(file_size) {
-                // Additional validation: verify the RunHeader at the MS address
-                // is actually parseable. This eliminates false positives where
-                // random data in SequenceRow/ASC looks like valid VCI entries.
-                let rh_addr = info.run_header_addr();
-                if rh_addr > 0 && RunHeader::parse(data, rh_addr, version).is_ok() {
-                    return Ok(info);
+    // Scan for the RawFileInfo preamble date signature (2-byte aligned):
+    //   Offset 0:  IsExpMethodPresent (i32, must be 0 or 1)
+    //   Offset 4:  year  (u16, 2000-2100)
+    //   Offset 6:  month (u16, 1-12)
+    //   Offset 10: day   (u16, 1-31)
+    // This eliminates >99.99% of positions with cheap byte comparisons.
+    let mut pos = start;
+    while pos + 12 <= search_limit {
+        // Quick reject: IsExpMethodPresent must be 0 or 1
+        let method = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+        if method <= 1 {
+            let year = u16::from_le_bytes([data[pos + 4], data[pos + 5]]);
+            if (2000..=2100).contains(&year) {
+                let month = u16::from_le_bytes([data[pos + 6], data[pos + 7]]);
+                if (1..=12).contains(&month) {
+                    let day = u16::from_le_bytes([data[pos + 10], data[pos + 11]]);
+                    if (1..=31).contains(&day) {
+                        // Preamble signature matches — try full parse + VCI validation
+                        if let Ok(info) = RawFileInfo::parse(data, pos as u64, version) {
+                            if info.has_valid_controllers(file_size) {
+                                let rh_addr = info.run_header_addr();
+                                if rh_addr > 0
+                                    && RunHeader::parse(data, rh_addr, version).is_ok()
+                                {
+                                    return Ok(info);
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
-        offset += 2;
+        pos += 2;
     }
 
     Err(RawError::StreamNotFound(

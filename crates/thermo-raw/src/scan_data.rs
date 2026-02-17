@@ -106,6 +106,145 @@ fn decode_legacy_centroids_only(
     }
 }
 
+/// Sum centroid intensities within [mz_low, mz_high] directly from raw scan bytes.
+///
+/// Zero allocations: dispatches to the appropriate decoder which reads bytes in-place.
+/// Returns the total intensity sum for peaks in the m/z window.
+pub fn sum_centroids_in_mz_range(
+    data: &[u8],
+    data_addr: usize,
+    entry: &ScanIndexEntry,
+    mz_low: f64,
+    mz_high: f64,
+) -> Result<f64, RawError> {
+    let abs_offset = data_addr as u64 + entry.offset;
+
+    if entry.data_size > 0 {
+        if abs_offset as usize + entry.data_size as usize > data.len() {
+            return Ok(0.0);
+        }
+    } else if abs_offset as usize >= data.len() {
+        return Ok(0.0);
+    }
+
+    if entry.number_packets == 0 && entry.data_size == 0 {
+        return Ok(0.0);
+    }
+
+    let packet_type_id = (entry.packet_type & 0xFFFF) as u16;
+
+    match packet_type_id {
+        18..=21 => scan_data_ftlt::sum_centroids_in_range_ftlt(data, abs_offset, mz_low, mz_high),
+        0..=5 | 14..=17 => sum_legacy_centroids_in_range(data, abs_offset, mz_low, mz_high),
+        _ => Ok(0.0),
+    }
+}
+
+/// Sum centroid intensities for multiple m/z ranges in a single scan pass.
+///
+/// `sorted_ranges` must be sorted by low bound. `out[i]` receives the total
+/// intensity for `sorted_ranges[i]`. Zero allocations.
+pub fn sum_centroids_multi_target(
+    data: &[u8],
+    data_addr: usize,
+    entry: &ScanIndexEntry,
+    sorted_ranges: &[(f64, f64)],
+    out: &mut [f64],
+) -> Result<(), RawError> {
+    let abs_offset = data_addr as u64 + entry.offset;
+
+    let mut empty = || {
+        for v in out.iter_mut().take(sorted_ranges.len()) {
+            *v = 0.0;
+        }
+    };
+
+    if entry.data_size > 0 {
+        if abs_offset as usize + entry.data_size as usize > data.len() {
+            empty();
+            return Ok(());
+        }
+    } else if abs_offset as usize >= data.len() {
+        empty();
+        return Ok(());
+    }
+
+    if entry.number_packets == 0 && entry.data_size == 0 {
+        empty();
+        return Ok(());
+    }
+
+    let packet_type_id = (entry.packet_type & 0xFFFF) as u16;
+
+    match packet_type_id {
+        18..=21 => scan_data_ftlt::sum_centroids_multi_target_ftlt(
+            data,
+            abs_offset,
+            sorted_ranges,
+            out,
+        ),
+        0..=5 | 14..=17 => {
+            sum_legacy_centroids_multi_target(data, abs_offset, sorted_ranges, out)
+        }
+        _ => {
+            empty();
+            Ok(())
+        }
+    }
+}
+
+/// Sum legacy centroid intensities in a single m/z range (skip profile, read centroids).
+fn sum_legacy_centroids_in_range(
+    data: &[u8],
+    abs_offset: u64,
+    mz_low: f64,
+    mz_high: f64,
+) -> Result<f64, RawError> {
+    let mut reader = BinaryReader::at_offset(data, abs_offset);
+    let header = PacketHeader::parse(&mut reader)?;
+
+    if header.profile_size > 0 {
+        reader.skip(header.profile_size as usize * 4)?;
+    }
+
+    if header.peak_list_size > 0 {
+        let peak_start = reader.position();
+        scan_data_centroid::sum_centroids_in_range(data, peak_start as usize, mz_low, mz_high)
+    } else {
+        Ok(0.0)
+    }
+}
+
+/// Sum legacy centroid intensities for multiple m/z ranges (skip profile, read centroids).
+fn sum_legacy_centroids_multi_target(
+    data: &[u8],
+    abs_offset: u64,
+    sorted_ranges: &[(f64, f64)],
+    out: &mut [f64],
+) -> Result<(), RawError> {
+    let mut reader = BinaryReader::at_offset(data, abs_offset);
+    let header = PacketHeader::parse(&mut reader)?;
+
+    if header.profile_size > 0 {
+        reader.skip(header.profile_size as usize * 4)?;
+    }
+
+    if header.peak_list_size > 0 {
+        let peak_start = reader.position();
+        scan_data_centroid::sum_centroids_multi_target(
+            data,
+            peak_start as usize,
+            sorted_ranges,
+            out,
+        )
+    } else {
+        for v in out.iter_mut().take(sorted_ranges.len()) {
+            *v = 0.0;
+        }
+        Ok(())
+    }
+}
+
 /// Decode a single scan from the data stream.
 ///
 /// `data` is the full file data. `data_addr` is the base address of the data

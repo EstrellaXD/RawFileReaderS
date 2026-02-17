@@ -58,6 +58,8 @@ pub fn batch_xic_ms1(
     type FileResult = Result<(String, Vec<Chromatogram>), (String, RawError)>;
 
     // Open all files in parallel and extract chromatograms.
+    // Uses RawFile::open (read into memory) for much faster random access
+    // during XIC extraction vs mmap (which suffers from page faults on cold cache).
     // Files that fail to open (e.g. blank acquisitions) are skipped with a warning.
     let results: Vec<FileResult> = paths
         .par_iter()
@@ -66,7 +68,7 @@ pub fn batch_xic_ms1(
                 .file_stem()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| "unknown".to_string());
-            match RawFile::open_mmap(path) {
+            match RawFile::open(path) {
                 Ok(raw) => match raw.xic_batch_ms1(targets) {
                     Ok(chroms) => Ok((name, chroms)),
                     Err(e) => Err((name, e)),
@@ -163,7 +165,7 @@ pub fn batch_xic_ms1_with_progress(
                 .file_stem()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| "unknown".to_string());
-            let result = match RawFile::open_mmap(path) {
+            let result = match RawFile::open(path) {
                 Ok(raw) => match raw.xic_batch_ms1(targets) {
                     Ok(chroms) => Ok((name, chroms)),
                     Err(e) => Err((name, e)),

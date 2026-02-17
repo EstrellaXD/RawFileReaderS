@@ -353,6 +353,177 @@ pub fn decode_ftlt_centroids_only(
     Ok((all_mz, all_intensity))
 }
 
+/// Sum centroid intensities within [mz_low, mz_high] directly from raw FT/LT bytes.
+///
+/// Zero allocations: reads bytes in-place, accumulates a running sum.
+/// Centroids are sorted by m/z, so we can break early once past mz_high.
+pub fn sum_centroids_in_range_ftlt(
+    data: &[u8],
+    abs_offset: u64,
+    mz_low: f64,
+    mz_high: f64,
+) -> Result<f64, RawError> {
+    let mut reader = BinaryReader::at_offset(data, abs_offset);
+    let header = FtLtPacketHeader::parse(&mut reader)?;
+
+    // Skip segment mass ranges (8 bytes each)
+    reader.skip(header.num_segments as usize * 8)?;
+
+    // Skip profile data entirely
+    let profile_bytes = header.num_profile_words as usize * 4;
+    if profile_bytes > 0 {
+        reader.skip(profile_bytes)?;
+    }
+
+    if header.num_centroid_words == 0 {
+        return Ok(0.0);
+    }
+
+    let accurate = header.is_accurate_mass();
+    let bytes_per_peak = header.bytes_per_centroid_peak();
+    let mut sum = 0.0f64;
+
+    for _ in 0..header.num_segments {
+        let count = reader.read_u32()?;
+        if count > 10_000_000 {
+            return Err(RawError::CorruptedData(format!(
+                "FT/LT centroid: unreasonable peak count {} in segment",
+                count
+            )));
+        }
+        if count == 0 {
+            continue;
+        }
+
+        let peak_bytes = count as usize * bytes_per_peak;
+        let raw = reader.slice(peak_bytes)?;
+        reader.skip(peak_bytes)?;
+
+        if accurate {
+            for i in 0..count as usize {
+                let base = i * 12;
+                let mz = f64::from_le_bytes(raw[base..base + 8].try_into().unwrap());
+                if mz > mz_high {
+                    break;
+                }
+                if mz >= mz_low {
+                    let intensity =
+                        f32::from_le_bytes(raw[base + 8..base + 12].try_into().unwrap());
+                    sum += intensity as f64;
+                }
+            }
+        } else {
+            for i in 0..count as usize {
+                let base = i * 8;
+                let mz = f32::from_le_bytes(raw[base..base + 4].try_into().unwrap()) as f64;
+                if mz > mz_high {
+                    break;
+                }
+                if mz >= mz_low {
+                    let intensity =
+                        f32::from_le_bytes(raw[base + 4..base + 8].try_into().unwrap());
+                    sum += intensity as f64;
+                }
+            }
+        }
+    }
+
+    Ok(sum)
+}
+
+/// Sum centroid intensities for multiple m/z ranges in a single scan pass.
+///
+/// `ranges` must be sorted by low bound. `out` must have length >= ranges.len().
+/// Uses sweep-line: walks centroids once, checks each against active ranges.
+/// Zero allocations beyond the caller-provided output slice.
+pub fn sum_centroids_multi_target_ftlt(
+    data: &[u8],
+    abs_offset: u64,
+    ranges: &[(f64, f64)],
+    out: &mut [f64],
+) -> Result<(), RawError> {
+    let mut reader = BinaryReader::at_offset(data, abs_offset);
+    let header = FtLtPacketHeader::parse(&mut reader)?;
+
+    // Skip segment mass ranges (8 bytes each)
+    reader.skip(header.num_segments as usize * 8)?;
+
+    // Skip profile data entirely
+    let profile_bytes = header.num_profile_words as usize * 4;
+    if profile_bytes > 0 {
+        reader.skip(profile_bytes)?;
+    }
+
+    // Initialize output to zero
+    for v in out.iter_mut().take(ranges.len()) {
+        *v = 0.0;
+    }
+
+    if header.num_centroid_words == 0 {
+        return Ok(());
+    }
+
+    let accurate = header.is_accurate_mass();
+    let bytes_per_peak = header.bytes_per_centroid_peak();
+    let n_ranges = ranges.len();
+
+    for _ in 0..header.num_segments {
+        let count = reader.read_u32()?;
+        if count > 10_000_000 {
+            return Err(RawError::CorruptedData(format!(
+                "FT/LT centroid: unreasonable peak count {} in segment",
+                count
+            )));
+        }
+        if count == 0 {
+            continue;
+        }
+
+        let peak_bytes = count as usize * bytes_per_peak;
+        let raw = reader.slice(peak_bytes)?;
+        reader.skip(peak_bytes)?;
+
+        // Sweep-line: track which range to start checking from
+        let mut range_start = 0usize;
+
+        for i in 0..count as usize {
+            let (mz, intensity) = if accurate {
+                let base = i * 12;
+                let mz = f64::from_le_bytes(raw[base..base + 8].try_into().unwrap());
+                let int = f32::from_le_bytes(raw[base + 8..base + 12].try_into().unwrap());
+                (mz, int as f64)
+            } else {
+                let base = i * 8;
+                let mz = f32::from_le_bytes(raw[base..base + 4].try_into().unwrap()) as f64;
+                let int = f32::from_le_bytes(raw[base + 4..base + 8].try_into().unwrap());
+                (mz, int as f64)
+            };
+
+            // Advance range_start past ranges whose high < mz
+            while range_start < n_ranges && ranges[range_start].1 < mz {
+                range_start += 1;
+            }
+
+            if range_start >= n_ranges {
+                break; // All ranges are below this mz, done
+            }
+
+            // Check all ranges that could contain this mz
+            for r in range_start..n_ranges {
+                let (low, high) = ranges[r];
+                if low > mz {
+                    break; // Ranges are sorted by low, so no more can match
+                }
+                if mz <= high {
+                    out[r] += intensity;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

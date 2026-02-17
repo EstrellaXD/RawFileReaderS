@@ -227,18 +227,15 @@ impl RawFileInfo {
 
     /// Check if this parsed RawFileInfo appears to contain valid VCI data.
     ///
-    /// Uses a two-pass approach:
+    /// Uses a three-pass approach:
     /// 1. **Strict**: Valid date + valid n_controllers + matching VCI entries
-    /// 2. **VCI-only fallback**: Ignores date/n_controllers, validates VCI structure directly.
+    /// 2. **Count-based**: Valid n_controllers (1-16), first n entries valid.
+    ///    Handles zeroed dates and garbage in unused VCI slots (e.g., v66 files
+    ///    where the RFI sits in a region with surrounding SequenceRow data).
+    /// 3. **VCI-only fallback**: Ignores date/n_controllers, validates VCI structure directly.
     ///    Used for files with zeroed-out preamble fields but intact VCI arrays.
-    ///
-    /// The VCI-only fallback counts valid entries (device_type 0-5, offset within file)
-    /// and zero entries. If all 64 entries are either valid or empty (no garbage),
-    /// and at least one is valid, the alignment is correct.
     pub fn has_valid_controllers(&self, file_size: u64) -> bool {
         // Quick reject: n_controllers must be in a plausible range (0-16).
-        // This prevents false positives when scanning through garbage data.
-        // n_controllers=0 is allowed (zeroed preamble files with intact VCI arrays).
         if self.n_controllers > 16 {
             return false;
         }
@@ -248,8 +245,29 @@ impl RawFileInfo {
             return true;
         }
 
-        // Pass 2: VCI-only fallback for files with zeroed preamble fields
+        // Pass 2: Count-based (only check first n_controllers entries)
+        if self.has_valid_controllers_by_count(file_size) {
+            return true;
+        }
+
+        // Pass 3: VCI-only fallback for files with zeroed preamble fields
         self.has_valid_controllers_vci_only(file_size)
+    }
+
+    /// Count-based validation: checks only the first n_controllers entries.
+    ///
+    /// Handles files with zeroed dates and garbage in VCI slots beyond
+    /// n_controllers (common in v66 files where the RFI offset falls within
+    /// a region surrounded by SequenceRow PascalString data).
+    fn has_valid_controllers_by_count(&self, file_size: u64) -> bool {
+        let n = self.n_controllers as usize;
+        if n == 0 || n > self.controllers.len() {
+            return false;
+        }
+
+        self.controllers[..n]
+            .iter()
+            .all(|c| Self::is_valid_controller(c, file_size))
     }
 
     fn has_valid_controllers_strict(&self, file_size: u64) -> bool {
@@ -386,7 +404,7 @@ mod tests {
             },
         ];
         // Pad to 64 entries with zeros
-        let mut full_controllers = controllers.clone();
+        let mut full_controllers = controllers;
         full_controllers.resize(64, VirtualControllerInfo::default());
 
         let info = make_test_info(2020, 5, 15, 2, full_controllers);
