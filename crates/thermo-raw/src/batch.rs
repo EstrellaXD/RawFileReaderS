@@ -41,7 +41,8 @@ impl BatchXicResult {
 /// * `paths` - RAW file paths
 /// * `targets` - (mz, ppm) pairs for each extraction target
 /// * `rt_range` - Optional (start, end) in minutes to restrict the RT window
-/// * `rt_resolution` - Grid spacing in minutes (default: 0.01 = 0.6s)
+/// * `rt_resolution` - Grid spacing in minutes. Use 0.0 to auto-detect from data
+///   (median inter-scan interval of the densest file).
 pub fn batch_xic_ms1(
     paths: &[&Path],
     targets: &[(f64, f64)],
@@ -98,47 +99,7 @@ pub fn batch_xic_ms1(
         ));
     }
 
-    let n_samples = per_file.len();
-    let n_targets = targets.len();
-
-    // Compute the common RT grid: intersection of all files' RT ranges
-    let (grid_start, grid_end) = compute_rt_bounds(&per_file, rt_range);
-
-    if grid_start >= grid_end {
-        return Err(RawError::CorruptedData(
-            "No overlapping RT range across files".to_string(),
-        ));
-    }
-
-    let rt_grid = build_rt_grid(grid_start, grid_end, rt_resolution);
-    let n_timepoints = rt_grid.len();
-
-    // Interpolate all chromatograms onto the common grid
-    let mut data = vec![0.0f64; n_samples * n_targets * n_timepoints];
-
-    for (s, (_name, chroms)) in per_file.iter().enumerate() {
-        let chroms: &Vec<Chromatogram> = chroms;
-        for (t, chrom) in chroms.iter().enumerate() {
-            let offset = (s * n_targets + t) * n_timepoints;
-            interpolate_onto_grid(
-                &chrom.rt,
-                &chrom.intensity,
-                &rt_grid,
-                &mut data[offset..offset + n_timepoints],
-            );
-        }
-    }
-
-    let sample_names = per_file.into_iter().map(|(name, _)| name).collect();
-
-    Ok(BatchXicResult {
-        rt_grid,
-        data,
-        sample_names,
-        n_samples,
-        n_targets,
-        n_timepoints,
-    })
+    assemble_batch_result(per_file, targets.len(), rt_range, rt_resolution)
 }
 
 /// Like [`batch_xic_ms1`], but increments the progress counter after each file.
@@ -196,9 +157,17 @@ pub fn batch_xic_ms1_with_progress(
         ));
     }
 
-    let n_samples = per_file.len();
-    let n_targets = targets.len();
+    assemble_batch_result(per_file, targets.len(), rt_range, rt_resolution)
+}
 
+/// Common assembly: resolve RT grid, interpolate all chromatograms.
+fn assemble_batch_result(
+    per_file: Vec<(String, Vec<Chromatogram>)>,
+    n_targets: usize,
+    rt_range: Option<(f64, f64)>,
+    rt_resolution: f64,
+) -> Result<BatchXicResult, RawError> {
+    let n_samples = per_file.len();
     let (grid_start, grid_end) = compute_rt_bounds(&per_file, rt_range);
 
     if grid_start >= grid_end {
@@ -207,13 +176,19 @@ pub fn batch_xic_ms1_with_progress(
         ));
     }
 
-    let rt_grid = build_rt_grid(grid_start, grid_end, rt_resolution);
+    // Auto-detect resolution from data when rt_resolution <= 0
+    let resolution = if rt_resolution <= 0.0 {
+        auto_rt_resolution(&per_file)
+    } else {
+        rt_resolution
+    };
+
+    let rt_grid = build_rt_grid(grid_start, grid_end, resolution);
     let n_timepoints = rt_grid.len();
 
     let mut data = vec![0.0f64; n_samples * n_targets * n_timepoints];
 
     for (s, (_name, chroms)) in per_file.iter().enumerate() {
-        let chroms: &Vec<Chromatogram> = chroms;
         for (t, chrom) in chroms.iter().enumerate() {
             let offset = (s * n_targets + t) * n_timepoints;
             interpolate_onto_grid(
@@ -235,6 +210,37 @@ pub fn batch_xic_ms1_with_progress(
         n_targets,
         n_timepoints,
     })
+}
+
+/// Auto-detect RT grid resolution from the median inter-scan interval
+/// of the file with the most data points (densest sampling).
+fn auto_rt_resolution(per_file: &[(String, Vec<Chromatogram>)]) -> f64 {
+    let mut best_resolution = 0.01; // fallback
+
+    for (_name, chroms) in per_file {
+        for chrom in chroms {
+            if chrom.rt.len() < 2 {
+                continue;
+            }
+            // Compute median inter-scan interval
+            let mut deltas: Vec<f64> = chrom
+                .rt
+                .windows(2)
+                .map(|w| w[1] - w[0])
+                .filter(|&d| d > 0.0)
+                .collect();
+            if deltas.is_empty() {
+                continue;
+            }
+            deltas.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+            let median = deltas[deltas.len() / 2];
+            if median < best_resolution {
+                best_resolution = median;
+            }
+        }
+    }
+
+    best_resolution
 }
 
 /// Compute the intersection of all RT ranges (max of starts, min of ends).

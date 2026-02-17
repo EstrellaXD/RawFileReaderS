@@ -120,8 +120,8 @@ enum Commands {
         /// Mass tolerance in ppm.
         #[arg(short, long, default_value = "5.0")]
         ppm: f64,
-        /// RT grid resolution in minutes.
-        #[arg(long, default_value = "0.01")]
+        /// RT grid resolution in minutes. Default: auto (matches native scan density).
+        #[arg(long, default_value = "0")]
         rt_resolution: f64,
         /// Optional RT range (start,end in minutes). Format: "1.5,30.0"
         #[arg(long)]
