@@ -154,9 +154,88 @@ jobs:
           path: crates/thermo-raw-py/dist/*.whl
           if-no-files-found: error
 
+  build-gui:
+    name: GUI / ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            archive: tar.gz
+          - target: x86_64-apple-darwin
+            runner: macos-14
+            archive: tar.gz
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc g++ clang libfontconfig-dev libwayland-dev \
+            libwebkit2gtk-4.1-dev libxkbcommon-x11-dev libx11-xcb-dev \
+            libssl-dev libzstd-dev \
+            vulkan-validationlayers libvulkan1
+
+      - name: Install cmake (Windows)
+        if: runner.os == 'Windows'
+        run: choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: gui-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: gui-${{ matrix.target }}-
+
+      - name: Build GUI
+        run: |
+          cargo build --release --target ${{ matrix.target }} -p thermo-raw-gui
+        shell: bash
+
+      - name: Prepare archive (unix)
+        if: matrix.archive == 'tar.gz'
+        run: |
+          BIN="target/${{ matrix.target }}/release/thermo-raw-gui"
+          cp "$BIN" thermo-raw-gui
+          tar czf thermo-raw-gui-${{ matrix.target }}.tar.gz thermo-raw-gui
+        shell: bash
+
+      - name: Prepare archive (windows)
+        if: matrix.archive == 'zip'
+        run: |
+          cp "target/${{ matrix.target }}/release/thermo-raw-gui.exe" thermo-raw-gui.exe
+          7z a thermo-raw-gui-${{ matrix.target }}.zip thermo-raw-gui.exe
+        shell: bash
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-${{ matrix.target }}
+          path: thermo-raw-gui-${{ matrix.target }}.${{ matrix.archive }}
+          if-no-files-found: error
+
   release:
     name: GitHub Release
-    needs: [build-cli, build-wheels]
+    needs: [build-cli, build-wheels, build-gui]
     runs-on: ubuntu-latest
 
     steps:
@@ -172,6 +251,9 @@ jobs:
           mkdir release-assets
           # CLI archives
           find artifacts/cli-* -type f \( -name '*.tar.gz' -o -name '*.zip' \) \
+            -exec cp {} release-assets/ \;
+          # GUI archives
+          find artifacts/gui-* -type f \( -name '*.tar.gz' -o -name '*.zip' \) \
             -exec cp {} release-assets/ \;
           # Python wheels
           find artifacts/wheels-* -type f -name '*.whl' \
