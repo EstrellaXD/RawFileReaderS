@@ -192,36 +192,30 @@ impl AppState {
         cx.notify();
     }
 
-    /// Open each file on the background executor to read scan counts,
-    /// then update the matching entries on the main thread.
+    /// Scan each file individually on the background executor so the UI
+    /// updates incrementally and the user can start converting as soon as
+    /// the first file is ready.
     fn scan_files_background(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            // Heavy I/O on background thread
-            let results: Vec<(PathBuf, Result<u32, String>)> = cx
-                .background_executor()
-                .spawn(async move {
-                    paths
-                        .into_iter()
-                        .map(|p| {
-                            let result = thermo_raw::RawFile::open_mmap(&p)
-                                .map(|raw| raw.n_scans())
-                                .map_err(|e| format!("Cannot read: {e}"));
-                            (p, result)
-                        })
-                        .collect()
-                })
-                .await;
+        for path in paths {
+            let bg_path = path.clone();
+            cx.spawn(async move |this, cx| {
+                let result = cx
+                    .background_executor()
+                    .spawn(async move {
+                        thermo_raw::RawFile::open_mmap(&bg_path)
+                            .map(|raw| raw.n_scans())
+                            .map_err(|e| format!("Cannot read: {e}"))
+                    })
+                    .await;
 
-            // Apply results back on the main thread
-            this.update(cx, |this, cx| {
-                for (path, result) in results {
+                this.update(cx, |this, cx| {
                     if let Some(entry) = this.files.iter_mut().find(|f| f.path == path) {
                         match result {
                             Ok(n) => {
                                 entry.n_scans = Some(n);
                                 entry.status = FileStatus::Pending;
                                 if this.output_dir.is_none() {
-                                    if let Some(parent) = path.parent() {
+                                    if let Some(parent) = entry.path.parent() {
                                         this.output_dir = Some(parent.to_path_buf());
                                     }
                                 }
@@ -232,12 +226,12 @@ impl AppState {
                             }
                         }
                     }
-                }
-                cx.notify();
+                    cx.notify();
+                })
+                .ok();
             })
-            .ok();
-        })
-        .detach();
+            .detach();
+        }
     }
 
     fn clear_files(&mut self, _: &ClickEvent, _window: &mut Window, cx: &mut Context<Self>) {

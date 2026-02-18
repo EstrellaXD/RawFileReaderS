@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **GUI: blocked conversion during scan**: Scan files incrementally on the background executor so the Convert button enables as soon as the first file is ready, instead of waiting for all files to finish scanning
+
 ## v0.4.4
 
 ### Fixed
