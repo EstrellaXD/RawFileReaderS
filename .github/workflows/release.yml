@@ -139,10 +139,12 @@ jobs:
           before-script-linux: |
             # Ensure python3.11 is on PATH inside the manylinux container
             ln -sf /opt/python/cp311-cp311/bin/python3 /usr/local/bin/python3.11
-            # pyo3-ffi with generate-import-lib needs libpython3.11.a but manylinux
-            # only ships shared libs. Create an empty archive to satisfy the search;
-            # PYO3_BUILD_EXTENSION_MODULE=1 means symbols come from the host process.
-            ar rcs /usr/local/lib/libpython3.11.a
+            # pyo3-ffi with generate-import-lib (injected by maturin for abi3)
+            # needs libpython3.11.a. Manylinux only has shared libs, so create an
+            # empty archive; PYO3_BUILD_EXTENSION_MODULE=1 means no symbols needed.
+            ar rcs /opt/python/cp311-cp311/lib/libpython3.11.a
+            # Tell the linker where to find it
+            export LIBRARY_PATH="/opt/python/cp311-cp311/lib:${LIBRARY_PATH:-}"
 
       - name: Install Rust toolchain
         if: runner.os != 'Linux'
