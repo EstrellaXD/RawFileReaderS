@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.4.4
+
 ### Fixed
 
 - **GUI freeze on Add Folder**: Move `RawFile::open_mmap()` and `read_dir` off the main thread to a background executor, keeping the UI responsive when adding hundreds of files

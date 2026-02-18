@@ -1,6 +1,6 @@
 [package]
 name = "thermo-raw-py"
-version = "0.4.2"
+version = "0.4.4"
 edition = "2021"
 description = "Python bindings for thermo-raw via PyO3"
 

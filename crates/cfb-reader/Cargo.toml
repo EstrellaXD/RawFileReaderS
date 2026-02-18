@@ -1,6 +1,6 @@
 [package]
 name = "cfb-reader"
-version = "0.4.2"
+version = "0.4.4"
 edition = "2021"
 description = "Thin wrapper around the cfb crate for Thermo RAW OLE2 container access"
 
