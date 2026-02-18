@@ -145,11 +145,12 @@ jobs:
             STUBDIR="/opt/python/cp311-cp311/lib"
             ar rcs "$STUBDIR/libpython3.11.a"
             export LIBRARY_PATH="$STUBDIR:${LIBRARY_PATH:-}"
-            # For aarch64 cross-compilation, place stub in every lib dir the
-            # cross-linker might search
-            find /usr/aarch64-unknown-linux-gnu -name "*.a" -path "*/lib/*" \
-              -exec dirname {} \; 2>/dev/null | sort -u | \
-              while read d; do ar rcs "$d/libpython3.11.a"; done
+            # For aarch64 cross-compilation, place stub in the cross-linker sysroot
+            if [ -d /usr/aarch64-unknown-linux-gnu ]; then
+              find /usr/aarch64-unknown-linux-gnu -name "*.a" -path "*/lib/*" \
+                -exec dirname {} \; 2>/dev/null | sort -u | \
+                while read d; do ar rcs "$d/libpython3.11.a"; done || true
+            fi
 
       - name: Install Rust toolchain
         if: runner.os != 'Linux'
