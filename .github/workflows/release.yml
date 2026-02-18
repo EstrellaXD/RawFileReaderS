@@ -137,8 +137,12 @@ jobs:
           manylinux: auto
           working-directory: crates/thermo-raw-py
           before-script-linux: |
-            # Ensure python3.11 is on PATH for the manylinux container
+            # Ensure python3.11 is on PATH inside the manylinux container
             ln -sf /opt/python/cp311-cp311/bin/python3 /usr/local/bin/python3.11
+            # pyo3-ffi with generate-import-lib needs libpython3.11.a but manylinux
+            # only ships shared libs. Create an empty archive to satisfy the search;
+            # PYO3_BUILD_EXTENSION_MODULE=1 means symbols come from the host process.
+            ar rcs /usr/local/lib/libpython3.11.a
 
       - name: Install Rust toolchain
         if: runner.os != 'Linux'
