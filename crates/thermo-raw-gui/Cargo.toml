@@ -1,0 +1,18 @@
+[package]
+name = "thermo-raw-gui"
+version = "0.1.0"
+edition = "2021"
+description = "GUI converter for Thermo RAW to mzML (GPUI-based)"
+publish = false
+
+[dependencies]
+thermo-raw = { path = "../thermo-raw" }
+thermo-raw-mzml = { path = "../thermo-raw-mzml" }
+gpui = { version = "0.2", features = ["runtime_shaders"] }
+gpui-component = "0.5"
+gpui-component-assets = "0.5"
+rfd = "0.15"
+anyhow = { workspace = true }
+
+[lints]
+workspace = true

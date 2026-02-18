@@ -430,7 +430,7 @@ fn write_mzml_body<W: Write>(
     raw: &RawFile,
     config: &MzmlConfig,
     source_filename: &str,
-    n_scans: u32,
+    _n_scans: u32,
     n_chromatograms: u32,
     instrument: &InstrumentInfo,
     spectrum_offsets: &mut Vec<(String, u64)>,
@@ -438,6 +438,25 @@ fn write_mzml_body<W: Write>(
     track_offsets: bool,
     progress_counter: Option<&ProgressCounter>,
 ) -> Result<(), MzmlError> {
+    // Pre-count spectra that will actually be written (for the count attribute).
+    let actual_spectrum_count = if config.include_ms2 {
+        raw.n_scans()
+    } else {
+        let events = raw.scan_events();
+        let mut count = 0u32;
+        for scan_num in raw.first_scan()..=raw.last_scan() {
+            let idx = (scan_num - raw.first_scan()) as usize;
+            let is_ms1 = events
+                .get(idx)
+                .map(|e| matches!(e.preamble.ms_level, MsLevel::Ms1))
+                .unwrap_or(true);
+            if is_ms1 {
+                count += 1;
+            }
+        }
+        count
+    };
+
     // <mzML>
     let mut mzml_start = BytesStart::new("mzML");
     mzml_start.push_attribute(("xmlns", "http://psi.hupo.org/ms/mzml"));
@@ -475,13 +494,30 @@ fn write_mzml_body<W: Write>(
 
     // <spectrumList>
     let mut spec_list = BytesStart::new("spectrumList");
-    spec_list.push_attribute(("count", n_scans.to_string().as_str()));
+    spec_list.push_attribute(("count", actual_spectrum_count.to_string().as_str()));
     spec_list.push_attribute(("defaultDataProcessingRef", "dp1"));
     writer.write_event(Event::Start(spec_list))?;
 
     // Write each spectrum
+    let scan_events = raw.scan_events();
+    let mut write_idx = 0usize;
     for scan_num in raw.first_scan()..=raw.last_scan() {
-        let scan_idx = (scan_num - raw.first_scan()) as usize;
+        let event_idx = (scan_num - raw.first_scan()) as usize;
+
+        // Skip MS2+ scans when not included
+        if !config.include_ms2 {
+            let is_ms1 = scan_events
+                .get(event_idx)
+                .map(|e| matches!(e.preamble.ms_level, MsLevel::Ms1))
+                .unwrap_or(true);
+            if !is_ms1 {
+                if let Some(c) = progress_counter {
+                    progress::tick(c);
+                }
+                continue;
+            }
+        }
+
         let spectrum_id = format!("scan={}", scan_num);
 
         if track_offsets {
@@ -491,12 +527,13 @@ fn write_mzml_body<W: Write>(
 
         match raw.scan(scan_num) {
             Ok(scan) => {
-                write_spectrum(writer, &scan, scan_idx, &spectrum_id, config)?;
+                write_spectrum(writer, &scan, write_idx, &spectrum_id, config)?;
             }
             Err(_) => {
-                write_empty_spectrum(writer, scan_num, scan_idx, &spectrum_id)?;
+                write_empty_spectrum(writer, scan_num, write_idx, &spectrum_id)?;
             }
         }
+        write_idx += 1;
         if let Some(c) = progress_counter {
             progress::tick(c);
         }
@@ -765,7 +802,25 @@ fn write_spectrum<W: Write>(
     spectrum_id: &str,
     config: &MzmlConfig,
 ) -> Result<(), MzmlError> {
-    let n_peaks = scan.centroid_mz.len();
+    // Apply intensity threshold filtering
+    let (mz_data, intensity_data);
+    let (mz_slice, intensity_slice) = if config.intensity_threshold > 0.0 {
+        let mut mz_vec = Vec::with_capacity(scan.centroid_mz.len());
+        let mut int_vec = Vec::with_capacity(scan.centroid_intensity.len());
+        for (mz, int) in scan.centroid_mz.iter().zip(scan.centroid_intensity.iter()) {
+            if *int > config.intensity_threshold {
+                mz_vec.push(*mz);
+                int_vec.push(*int);
+            }
+        }
+        mz_data = mz_vec;
+        intensity_data = int_vec;
+        (mz_data.as_slice(), intensity_data.as_slice())
+    } else {
+        (scan.centroid_mz.as_slice(), scan.centroid_intensity.as_slice())
+    };
+
+    let n_peaks = mz_slice.len();
     let default_array_length = n_peaks.to_string();
 
     let mut spec = BytesStart::new("spectrum");
@@ -820,9 +875,9 @@ fn write_spectrum<W: Write>(
     )?;
 
     // m/z range
-    if !scan.centroid_mz.is_empty() {
-        let low = scan.centroid_mz.first().unwrap();
-        let high = scan.centroid_mz.last().unwrap();
+    if !mz_slice.is_empty() {
+        let low = mz_slice.first().unwrap();
+        let high = mz_slice.last().unwrap();
         write_cv_param(
             writer,
             cv::LOWEST_MZ,
@@ -872,7 +927,7 @@ fn write_spectrum<W: Write>(
     }
 
     // <binaryDataArrayList>
-    write_binary_data_arrays(writer, &scan.centroid_mz, &scan.centroid_intensity, config)?;
+    write_binary_data_arrays(writer, mz_slice, intensity_slice, config)?;
 
     writer.write_event(Event::End(BytesEnd::new("spectrum")))?;
     Ok(())

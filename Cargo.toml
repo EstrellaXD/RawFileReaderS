@@ -4,6 +4,7 @@ members = [
     "crates/cfb-reader",
     "crates/thermo-raw",
     "crates/thermo-raw-cli",
+    "crates/thermo-raw-gui",
     "crates/thermo-raw-mzml",
     "tools/hex-analyzer",
 ]

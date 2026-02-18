@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **GPUI desktop converter**: New `thermo-raw-gui` crate with GPU-accelerated desktop GUI for RAW-to-mzML conversion
+  - File/folder selection via async file dialogs, scan count preview, per-file status tracking
+  - Progress bar with cancel support, conversion options (precision, compression, indexed mzML)
+  - Built with Zed's GPUI framework + gpui-component; supports macOS, Linux, Windows
+- **MS2 filtering**: `--ms1-only` CLI flag and GUI checkbox to exclude MS2+ scans from mzML output
+- **Intensity threshold**: `--min-intensity` CLI flag and GUI input to filter out low/zero-intensity peaks, reducing mzML file size
+- New `MzmlConfig` fields: `include_ms2` (default: true) and `intensity_threshold` (default: 0.0)
+
 ## v0.4.3
 
 ### Changed

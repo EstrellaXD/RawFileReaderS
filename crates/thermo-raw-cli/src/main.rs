@@ -104,6 +104,12 @@ enum Commands {
         /// Skip index generation (plain mzML instead of indexed).
         #[arg(long)]
         no_index: bool,
+        /// Exclude MS2+ scans (only write MS1).
+        #[arg(long)]
+        ms1_only: bool,
+        /// Minimum intensity threshold; peaks at or below this are excluded.
+        #[arg(long, default_value = "0")]
+        min_intensity: f64,
     },
 
     /// Batch EIC extraction across multiple RAW files.
@@ -614,6 +620,8 @@ fn main() -> anyhow::Result<()> {
             intensity_bits,
             compression,
             no_index,
+            ms1_only,
+            min_intensity,
         } => {
             let mz_precision = match mz_bits {
                 32 => thermo_raw_mzml::Precision::F32,
@@ -632,6 +640,8 @@ fn main() -> anyhow::Result<()> {
                 intensity_precision,
                 compression: comp,
                 write_index: !no_index,
+                include_ms2: !ms1_only,
+                intensity_threshold: min_intensity,
             };
 
             if input.is_dir() {

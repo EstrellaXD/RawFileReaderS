@@ -58,6 +58,10 @@ pub struct MzmlConfig {
     pub compression: Compression,
     /// Write indexed mzML with offset index (default: true).
     pub write_index: bool,
+    /// Include MS2+ scans (default: true).
+    pub include_ms2: bool,
+    /// Minimum intensity threshold; peaks at or below this value are excluded (default: 0.0 = keep all).
+    pub intensity_threshold: f64,
 }
 
 impl Default for MzmlConfig {
@@ -67,6 +71,8 @@ impl Default for MzmlConfig {
             intensity_precision: Precision::F32,
             compression: Compression::Zlib,
             write_index: true,
+            include_ms2: true,
+            intensity_threshold: 0.0,
         }
     }
 }
