@@ -133,7 +133,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter
+          args: --release --out dist
           manylinux: auto
           working-directory: crates/thermo-raw-py
 
