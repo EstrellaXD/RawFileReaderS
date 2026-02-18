@@ -116,6 +116,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Python
+        if: runner.os != 'Linux'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Set up QEMU
         if: matrix.target == 'aarch64' && runner.os == 'Linux'
         uses: docker/setup-qemu-action@v3
@@ -127,7 +133,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --interpreter 3.11
+          args: --release --out dist --find-interpreter
           manylinux: auto
           working-directory: crates/thermo-raw-py
 
@@ -143,7 +149,7 @@ jobs:
           pip install maturin
           cd crates/thermo-raw-py
           maturin build --release --out dist \
-            --interpreter 3.11 \
+            --interpreter python3 \
             ${{ matrix.rust-target && format('--target {0}', matrix.rust-target) || '' }}
         shell: bash
 
