@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **GUI freeze on Add Folder**: Move `RawFile::open_mmap()` and `read_dir` off the main thread to a background executor, keeping the UI responsive when adding hundreds of files
+- **Windows console window**: Hide the console that appeared behind the GUI window via `windows_subsystem = "windows"`
+
 ### Added
 
 - **GPUI desktop converter**: New `thermo-raw-gui` crate with GPU-accelerated desktop GUI for RAW-to-mzML conversion

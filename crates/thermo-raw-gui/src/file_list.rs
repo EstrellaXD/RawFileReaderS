@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileStatus {
+    Scanning,
     Pending,
     Converting,
     Done,
@@ -47,6 +48,7 @@ impl FileEntry {
 
     pub fn status_label(&self) -> &'static str {
         match self.status {
+            FileStatus::Scanning => "Scanning...",
             FileStatus::Pending => "Pending",
             FileStatus::Converting => "Converting...",
             FileStatus::Done => "Done",

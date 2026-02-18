@@ -129,7 +129,8 @@ impl AppState {
             if let Some(handles) = dialog.pick_files().await {
                 let paths: Vec<PathBuf> = handles.into_iter().map(|h| h.path().to_path_buf()).collect();
                 this.update(cx, |this, cx| {
-                    this.add_paths(paths, cx);
+                    this.add_paths(&paths, cx);
+                    this.scan_files_background(paths, cx);
                 }).ok();
             }
         })
@@ -147,52 +148,96 @@ impl AppState {
 
             if let Some(handle) = dialog.pick_folder().await {
                 let folder = handle.path().to_path_buf();
-                let paths: Vec<PathBuf> = std::fs::read_dir(&folder)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|e| e.ok())
-                    .map(|e| e.path())
-                    .filter(|p| {
-                        p.extension()
-                            .is_some_and(|ext| ext.eq_ignore_ascii_case("raw"))
+
+                // read_dir on background thread (can be slow on network drives)
+                let folder_clone = folder.clone();
+                let paths: Vec<PathBuf> = cx
+                    .background_executor()
+                    .spawn(async move {
+                        std::fs::read_dir(&folder_clone)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|e| e.ok())
+                            .map(|e| e.path())
+                            .filter(|p| {
+                                p.extension()
+                                    .is_some_and(|ext| ext.eq_ignore_ascii_case("raw"))
+                            })
+                            .collect()
                     })
-                    .collect();
+                    .await;
 
                 this.update(cx, |this, cx| {
                     if this.output_dir.is_none() {
                         this.output_dir = Some(folder);
                     }
-                    this.add_paths(paths, cx);
+                    this.add_paths(&paths, cx);
+                    this.scan_files_background(paths, cx);
                 }).ok();
             }
         })
         .detach();
     }
 
-    fn add_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+    /// Push placeholder entries for each path (no I/O, instant).
+    fn add_paths(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
         for path in paths {
-            if self.files.iter().any(|f| f.path == path) {
+            if self.files.iter().any(|f| f.path == *path) {
                 continue;
             }
             let mut entry = FileEntry::new(path.clone());
-            // Read scan count in-line (fast with mmap)
-            match thermo_raw::RawFile::open_mmap(&path) {
-                Ok(raw) => {
-                    entry.n_scans = Some(raw.n_scans());
-                    if self.output_dir.is_none() {
-                        if let Some(parent) = path.parent() {
-                            self.output_dir = Some(parent.to_path_buf());
-                        }
-                    }
-                }
-                Err(e) => {
-                    entry.status = FileStatus::Failed;
-                    entry.error = Some(format!("Cannot read: {e}"));
-                }
-            }
+            entry.status = FileStatus::Scanning;
             self.files.push(entry);
         }
         cx.notify();
+    }
+
+    /// Open each file on the background executor to read scan counts,
+    /// then update the matching entries on the main thread.
+    fn scan_files_background(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            // Heavy I/O on background thread
+            let results: Vec<(PathBuf, Result<u32, String>)> = cx
+                .background_executor()
+                .spawn(async move {
+                    paths
+                        .into_iter()
+                        .map(|p| {
+                            let result = thermo_raw::RawFile::open_mmap(&p)
+                                .map(|raw| raw.n_scans())
+                                .map_err(|e| format!("Cannot read: {e}"));
+                            (p, result)
+                        })
+                        .collect()
+                })
+                .await;
+
+            // Apply results back on the main thread
+            this.update(cx, |this, cx| {
+                for (path, result) in results {
+                    if let Some(entry) = this.files.iter_mut().find(|f| f.path == path) {
+                        match result {
+                            Ok(n) => {
+                                entry.n_scans = Some(n);
+                                entry.status = FileStatus::Pending;
+                                if this.output_dir.is_none() {
+                                    if let Some(parent) = path.parent() {
+                                        this.output_dir = Some(parent.to_path_buf());
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                entry.status = FileStatus::Failed;
+                                entry.error = Some(e);
+                            }
+                        }
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn clear_files(&mut self, _: &ClickEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -428,6 +473,7 @@ impl AppState {
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let status_color = match entry.status {
+            FileStatus::Scanning => cx.theme().muted_foreground,
             FileStatus::Pending => cx.theme().muted_foreground,
             FileStatus::Converting => cx.theme().blue,
             FileStatus::Done => cx.theme().green,
@@ -477,12 +523,14 @@ impl AppState {
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .w(px(60.))
-                    .child(
+                    .child(if entry.status == FileStatus::Scanning {
+                        "...".into()
+                    } else {
                         entry
                             .n_scans
                             .map(|n| format!("{n} scans"))
-                            .unwrap_or_else(|| "N/A".into()),
-                    ),
+                            .unwrap_or_else(|| "N/A".into())
+                    }),
             )
             .child(
                 div()
