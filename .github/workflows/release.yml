@@ -133,9 +133,12 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist
+          args: --release --out dist -i python3.11
           manylinux: auto
           working-directory: crates/thermo-raw-py
+          before-script-linux: |
+            # Ensure python3.11 is on PATH for the manylinux container
+            ln -sf /opt/python/cp311-cp311/bin/python3 /usr/local/bin/python3.11
 
       - name: Install Rust toolchain
         if: runner.os != 'Linux'
